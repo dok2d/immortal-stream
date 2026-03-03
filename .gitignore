@@ -1,0 +1,4 @@
+config.yaml
+media/
+*.pyc
+__pycache__/

@@ -1,0 +1,49 @@
+# Podman Compose / Docker Compose for immortal-stream
+# Usage: podman-compose up -d
+#        docker compose up -d
+
+services:
+  immortal-stream:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: immortal-stream:latest
+    container_name: immortal-stream
+    restart: unless-stopped
+
+    volumes:
+      # Config file (required)
+      - ./config.yaml:/etc/immortal-stream/config.yaml:ro
+      # Media files: placeholder image/video, overlay image, fonts
+      - ./media:/media:ro
+
+    ports:
+      # RTMP / RTSP ingest
+      - "1935:1935/tcp"
+      # SRT ingest
+      - "8890:8890/udp"
+
+    environment:
+      LOG_LEVEL: INFO
+      # CONFIG_PATH: /etc/immortal-stream/config.yaml  # default
+
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: false   # /tmp is needed for mediamtx config
+    tmpfs:
+      - /tmp:size=64m
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9997/v3/paths/list"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      driver: journald
+      options:
+        tag: immortal-stream
