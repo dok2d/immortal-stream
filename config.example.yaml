@@ -1,0 +1,110 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║              immortal-stream  —  example configuration           ║
+# ╚══════════════════════════════════════════════════════════════════╝
+#
+# Layers (bottom → top):
+#   1. Placeholder  — always sent to the target service; shown when no
+#                     incoming stream is active. Keeps the broadcast alive.
+#   2. Incoming     — live stream from any source (RTMP / RTSP / SRT /
+#                     HLS / file / etc.). Replaces the placeholder while
+#                     active.
+#   3. Overlay      — image or text drawn on top of the incoming stream;
+#                     visible ONLY when a stream is active.
+#
+# Copy this file to config.yaml, fill in your values, and mount it
+# read-only into the container at /etc/immortal-stream/config.yaml.
+
+
+# ── Ingest ─────────────────────────────────────────────────────────────────────
+ingest:
+  # TCP port for RTMP / RTSP ingestion.
+  port: 1935
+
+  # UDP port for SRT ingestion.
+  srt_port: 8890
+
+  # Set to true to only accept streams whose path ends with `allowed_key`.
+  # Connect as: rtmp://host:1935/live/<allowed_key>
+  # When false, any publisher is accepted on the /live/* path.
+  stream_key_required: false
+  allowed_key: ""        # e.g. "mysecretkey123"
+
+
+# ── Placeholder layer ──────────────────────────────────────────────────────────
+# Shown to the target service whenever no incoming stream is active.
+# If omitted entirely, a plain black screen is used.
+placeholder:
+  # Type: black | image | video
+  type: image
+
+  # Path to the placeholder file (image: JPEG/PNG, video: any FFmpeg-readable).
+  # Must be accessible inside the container (mount with -v or bake into image).
+  path: /media/placeholder.jpg
+
+  # Position of the placeholder within the output frame.
+  # Ignored for black type; for image/video, the content is padded to fill the
+  # output resolution — x/y shift is applied after padding.
+  x: 0
+  y: 0
+
+  # Opacity 0.0 (transparent) … 1.0 (opaque).
+  opacity: 1.0
+
+
+# ── Supplementary overlay layer ────────────────────────────────────────────────
+# Optional image or text drawn on top of the incoming stream.
+# NOT shown during placeholder-only mode.
+overlay:
+  enabled: true
+
+  # Type: image | text
+  type: image
+
+  # ── Image overlay ──────────────────────────────────────────────────
+  path: /media/overlay.png   # JPEG or PNG with optional transparency
+
+  # ── Text overlay ───────────────────────────────────────────────────
+  # (used when type: text)
+  # text: "LIVE — My Channel"
+  # font_path: /media/fonts/DejaVuSans.ttf   # TTF/OTF font file
+  # font_size: 48
+  # font_color: white                         # FFmpeg color name or #RRGGBB
+
+  # Position of the overlay inside the output frame (pixels from top-left).
+  x: 20
+  y: 20
+
+  # Opacity 0.0 … 1.0
+  opacity: 0.9
+
+
+# ── Output ─────────────────────────────────────────────────────────────────────
+output:
+  # One or more RTMP(S) destinations.
+  # The output connection is established once at startup and never dropped,
+  # regardless of changes in the incoming stream.
+  targets:
+    - rtmp://a.rtmp.youtube.com/live2/xxxx-xxxx-xxxx-xxxx
+    # - rtmp://live.twitch.tv/app/live_XXXXXXXXX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    # - rtmp://live.restream.io/live/YOUR_KEY
+
+  video:
+    width: 1920
+    height: 1080
+    fps: 30
+    bitrate: 6000k       # target video bitrate
+    preset: ultrafast    # FFmpeg x264 preset (ultrafast…veryslow); keep ultrafast for low CPU
+    gop: 60              # keyframe interval in frames (= fps × 2 seconds recommended)
+
+  audio:
+    bitrate: 128k
+    sample_rate: 44100   # Hz
+
+
+# ── Telegram notifications ─────────────────────────────────────────────────────
+# Receive detailed event notifications in a Telegram chat.
+# Events: stream started/stopped, process restarts, errors.
+telegram:
+  enabled: true
+  bot_token: "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  chat_id: "-1001234567890"    # group/channel (negative) or user ID (positive)
