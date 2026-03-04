@@ -66,7 +66,13 @@ def _detect_version(bin_path: str) -> Tuple[int, int]:
 # ── Config generators ──────────────────────────────────────────────────────────
 
 def _gen_config_v1(cfg: Config) -> str:
-    """mediamtx ≥ v1.0 — nested object fields."""
+    """mediamtx v1.x — flat top-level keys (no nested protocol objects).
+
+    RTMP and RTSP are on by default; configure only address.
+    SRT requires an explicit bool enable flag.
+    HLS and WebRTC are disabled by bool.
+    protocols: [tcp] restricts RTSP transport to TCP for localhost reliability.
+    """
     return (
         "logLevel: warn\n"
         "logDestinations: [stdout]\n"
@@ -74,24 +80,16 @@ def _gen_config_v1(cfg: Config) -> str:
         "api: yes\n"
         f"apiAddress: 127.0.0.1:{cfg.mediamtx_api_port}\n"
         "\n"
-        "rtmp:\n"
-        "  enabled: yes\n"
-        f"  address: :{cfg.internal_rtmp_port}\n"
+        f"rtmpAddress: :{cfg.internal_rtmp_port}\n"
         "\n"
-        "rtsp:\n"
-        "  enabled: yes\n"
-        f"  address: :{cfg.internal_rtsp_port}\n"
-        "  protocols: [tcp]\n"
+        f"rtspAddress: :{cfg.internal_rtsp_port}\n"
+        "protocols: [tcp]\n"
         "\n"
-        "srt:\n"
-        "  enabled: yes\n"
-        f"  address: :{cfg.ingest.srt_port}\n"
+        "srt: yes\n"
+        f"srtAddress: :{cfg.ingest.srt_port}\n"
         "\n"
-        "hls:\n"
-        "  enabled: no\n"
-        "\n"
-        "webrtc:\n"
-        "  enabled: no\n"
+        "hls: no\n"
+        "webrtc: no\n"
     )
 
 
