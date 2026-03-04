@@ -1,6 +1,7 @@
 """Configuration loading and dataclasses for immortal-stream."""
 from dataclasses import dataclass, field
 from typing import Optional, List
+import secrets
 import yaml
 import os
 
@@ -73,11 +74,14 @@ class Config:
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
-    # Internal ports (not user-configurable)
+    # Internal — generated at runtime, not user-configurable
     internal_rtsp_port: int = 8554
     internal_rtmp_port: int = 1935
     mediamtx_api_port: int = 9997
-    internal_token: str = ""  # random token for internal RTMP auth
+    # Random path name for the compositor's internal RTMP/RTSP path.
+    # Using a secret name instead of auth avoids mediamtx version
+    # compatibility issues with publishUser/publishPass fields.
+    composite_path: str = field(default_factory=lambda: f"_c{secrets.token_hex(8)}")
 
 
 def load_config(path: str) -> Config:
@@ -147,8 +151,5 @@ def load_config(path: str) -> Config:
             bot_token=t.get("bot_token", ""),
             chat_id=str(t.get("chat_id", "")),
         )
-
-    # Internal settings from environment (set by entrypoint)
-    cfg.internal_token = os.environ.get("INTERNAL_TOKEN", "changeme")
 
     return cfg

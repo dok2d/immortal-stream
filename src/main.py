@@ -15,6 +15,7 @@ from config import load_config
 from mediamtx_manager import MediamtxManager
 from stream_manager import StreamManager
 from telegram import TelegramNotifier, NoopNotifier
+from tgbot import TelegramBot
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -75,6 +76,14 @@ async def main() -> None:
     await manager.start()
 
     # ------------------------------------------------------------------ #
+    #  Telegram bot (runtime config changes)                              #
+    # ------------------------------------------------------------------ #
+    bot: TelegramBot | None = None
+    if cfg.telegram.enabled and cfg.telegram.bot_token and cfg.telegram.chat_id:
+        bot = TelegramBot(cfg, manager)
+        bot.start()
+
+    # ------------------------------------------------------------------ #
     #  Startup notification                                                #
     # ------------------------------------------------------------------ #
     target_list = "\n".join(f"  • {t}" for t in cfg.output.targets) or "  (none)"
@@ -104,6 +113,8 @@ async def main() -> None:
 
     log.info("Shutting down...")
     notifier.send("🔌 <b>immortal-stream stopping</b>")
+    if bot:
+        await bot.stop()
     await manager.stop()
     await mediamtx.stop()
     await notifier.stop()

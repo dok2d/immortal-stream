@@ -139,7 +139,8 @@ class StreamManager:
 
     def _is_ingest_path(self, name: str) -> bool:
         """True for paths that correspond to external ingest streams."""
-        if name in ("composite", "relay"):
+        # Ignore internal compositor path (secret random name starting with _c)
+        if name == self.cfg.composite_path or name.startswith("_c"):
             return False
         return name.startswith("live")
 
@@ -217,6 +218,28 @@ class StreamManager:
             )
 
     # ------------------------------------------------------------------ #
+    #  Public hot-reload API (called by Telegram bot)                      #
+    # ------------------------------------------------------------------ #
+
+    async def reload_compositor(self) -> None:
+        """Restart compositor with the current config (placeholder/overlay changed)."""
+        async with self._lock:
+            if self._current_stream:
+                await self._start_compositor_live(self._current_stream)
+            else:
+                await self._start_compositor_idle()
+
+    async def reload_output(self) -> None:
+        """Restart output FFmpeg (targets changed). Briefly interrupts connection."""
+        if self._output and self._output.returncode is None:
+            self._output.terminate()
+            try:
+                await asyncio.wait_for(self._output.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self._output.kill()
+        await self._start_output()
+
+    # ------------------------------------------------------------------ #
     #  Compositor management                                               #
     # ------------------------------------------------------------------ #
 
@@ -269,6 +292,9 @@ class StreamManager:
     # ------------------------------------------------------------------ #
 
     async def _start_output(self) -> None:
+        if not self.cfg.output.targets:
+            log.info("No output targets configured — output FFmpeg not started")
+            return
         try:
             cmd = build_output(self.cfg)
         except Exception as e:

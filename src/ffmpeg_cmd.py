@@ -50,10 +50,12 @@ def _output_flags(cfg: Config, dest: str) -> List[str]:
 
 
 def _composite_dest(cfg: Config) -> str:
-    return (
-        f"rtmp://internal:{cfg.internal_token}"
-        f"@127.0.0.1:{cfg.internal_rtmp_port}/composite"
-    )
+    """
+    RTMP URL the compositor pushes to (internal mediamtx path).
+    Uses a per-run secret path name instead of auth credentials,
+    avoiding mediamtx publishUser/publishPass field compatibility issues.
+    """
+    return f"rtmp://127.0.0.1:{cfg.internal_rtmp_port}/{cfg.composite_path}"
 
 
 def build_compositor_idle(cfg: Config) -> List[str]:
@@ -217,11 +219,13 @@ def build_compositor_live(
 
 def build_output(cfg: Config) -> List[str]:
     """
-    Output FFmpeg — reads from the mediamtx relay path, writes to all targets.
-    This process NEVER restarts; it holds the persistent RTMP connection
-    to the target services.
+    Output FFmpeg — reads the compositor output from mediamtx (RTSP),
+    writes to all configured RTMP targets. This process NEVER restarts;
+    it holds the persistent RTMP connection to the target services.
+    Brief reconnects to the composite path (< 2 s during compositor restart)
+    are handled by -reconnect flags; RTMP targets stay connected throughout.
     """
-    relay_url = f"rtsp://127.0.0.1:{cfg.internal_rtsp_port}/relay"
+    relay_url = f"rtsp://127.0.0.1:{cfg.internal_rtsp_port}/{cfg.composite_path}"
     targets = cfg.output.targets
 
     if not targets:

@@ -1,8 +1,10 @@
 """
-mediamtx process manager — generates config and runs mediamtx.
+mediamtx process manager.
 
-Stream detection is done by polling the mediamtx HTTP API (/v3/paths/list)
-instead of using runOnPublish hooks, which avoids version compatibility issues.
+Config philosophy: use the absolute minimum fields to avoid breaking on
+mediamtx version differences. No `paths:` section — mediamtx creates paths
+dynamically on first publish/subscribe. The compositor uses a secret random
+path name (cfg.composite_path) instead of per-path auth credentials.
 """
 import asyncio
 import logging
@@ -19,58 +21,40 @@ MEDIAMTX_BIN = os.environ.get("MEDIAMTX_BIN", "/usr/local/bin/mediamtx")
 
 def generate_mediamtx_config(cfg: Config) -> str:
     """
-    Generate mediamtx YAML configuration.
+    Generate a minimal mediamtx YAML configuration.
 
-    Paths:
-      live (or live/KEY)  — external ingest (RTMP/RTSP/SRT)
-      composite           — compositor writes here (RTMP, auth-protected)
-      relay               — auto-relays from composite; output FFmpeg reads this
+    Only sets the fields that are stable across mediamtx v1.x versions:
+    - log level / destinations
+    - API address (for our polling)
+    - protocol enable/disable and listen addresses
+    No `paths:` section — paths are created dynamically by mediamtx.
     """
-    token = cfg.internal_token
-
-    if cfg.ingest.stream_key_required and cfg.ingest.allowed_key:
-        ingest_path_name = f"live/{cfg.ingest.allowed_key}"
-    else:
-        ingest_path_name = "~^live"
-
-    config_yaml = (
-        f"logLevel: warn\n"
-        f"logDestinations: [stdout]\n"
-        f"\n"
-        f"api: yes\n"
+    return (
+        "logLevel: warn\n"
+        "logDestinations: [stdout]\n"
+        "\n"
+        "api: yes\n"
         f"apiAddress: 127.0.0.1:{cfg.mediamtx_api_port}\n"
-        f"\n"
-        f"rtmp:\n"
-        f"  enabled: yes\n"
+        "\n"
+        "rtmp:\n"
+        "  enabled: yes\n"
         f"  address: :{cfg.internal_rtmp_port}\n"
-        f"\n"
-        f"rtsp:\n"
-        f"  enabled: yes\n"
+        "\n"
+        "rtsp:\n"
+        "  enabled: yes\n"
         f"  address: :{cfg.internal_rtsp_port}\n"
-        f"  protocols: [tcp]\n"
-        f"\n"
-        f"srt:\n"
-        f"  enabled: yes\n"
+        "  protocols: [tcp]\n"
+        "\n"
+        "srt:\n"
+        "  enabled: yes\n"
         f"  address: :{cfg.ingest.srt_port}\n"
-        f"\n"
-        f"hls:\n"
-        f"  enabled: no\n"
-        f"\n"
-        f"webrtc:\n"
-        f"  enabled: no\n"
-        f"\n"
-        f"paths:\n"
-        f"  {ingest_path_name}:\n"
-        f"\n"
-        f"  composite:\n"
-        f"    publishUser: internal\n"
-        f"    publishPass: {token}\n"
-        f"\n"
-        f"  relay:\n"
-        f"    source: rtsp://127.0.0.1:{cfg.internal_rtsp_port}/composite\n"
-        f"    sourceReconnectPeriod: 500ms\n"
+        "\n"
+        "hls:\n"
+        "  enabled: no\n"
+        "\n"
+        "webrtc:\n"
+        "  enabled: no\n"
     )
-    return config_yaml
 
 
 class MediamtxManager:
@@ -87,7 +71,7 @@ class MediamtxManager:
         with os.fdopen(fd, "w") as f:
             f.write(config_content)
 
-        log.debug("mediamtx config written to %s:\n%s", path, config_content)
+        log.debug("mediamtx config:\n%s", config_content)
 
         self._proc = await asyncio.create_subprocess_exec(
             MEDIAMTX_BIN, path,
@@ -98,10 +82,10 @@ class MediamtxManager:
         log.info("mediamtx started (pid=%d)", self._proc.pid)
 
     async def wait_ready(self, timeout: float = 15.0) -> bool:
-        """Poll mediamtx API until it responds."""
+        """Poll mediamtx API until it responds or timeout expires."""
         import urllib.request
-        deadline = asyncio.get_event_loop().time() + timeout
         url = f"http://127.0.0.1:{self.cfg.mediamtx_api_port}/v3/paths/list"
+        deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             try:
                 await asyncio.get_event_loop().run_in_executor(
@@ -111,6 +95,7 @@ class MediamtxManager:
                 return True
             except Exception:
                 await asyncio.sleep(0.5)
+        log.error("mediamtx did not become ready within %.0fs", timeout)
         return False
 
     async def stop(self) -> None:
