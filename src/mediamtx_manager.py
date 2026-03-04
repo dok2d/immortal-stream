@@ -1,10 +1,12 @@
 """
 mediamtx process manager — generates config and runs mediamtx.
+
+Stream detection is done by polling the mediamtx HTTP API (/v3/paths/list)
+instead of using runOnPublish hooks, which avoids version compatibility issues.
 """
 import asyncio
 import logging
 import os
-import signal
 import tempfile
 from typing import Optional
 
@@ -20,70 +22,55 @@ def generate_mediamtx_config(cfg: Config) -> str:
     Generate mediamtx YAML configuration.
 
     Paths:
-      live          — external ingest (RTMP/RTSP/SRT)
-      composite     — compositor writes here (internal RTMP, auth-protected)
-      relay         — auto-relay from composite → output FFmpeg reads this
+      live (or live/KEY)  — external ingest (RTMP/RTSP/SRT)
+      composite           — compositor writes here (RTMP, auth-protected)
+      relay               — auto-relays from composite; output FFmpeg reads this
     """
     token = cfg.internal_token
-    webhook = f"http://127.0.0.1:{cfg.webhook_port}"
 
-    # Decide which ingest path to configure
     if cfg.ingest.stream_key_required and cfg.ingest.allowed_key:
         ingest_path_name = f"live/{cfg.ingest.allowed_key}"
     else:
         ingest_path_name = "~^live"
 
-    config_yaml = f"""
-logLevel: warn
-logDestinations: [stdout]
-
-api: yes
-apiAddress: 127.0.0.1:{cfg.mediamtx_api_port}
-
-rtmp:
-  enabled: yes
-  address: :{cfg.internal_rtmp_port}
-
-rtsp:
-  enabled: yes
-  address: :{cfg.internal_rtsp_port}
-  protocols: [tcp]
-
-srt:
-  enabled: yes
-  address: :{cfg.ingest.srt_port}
-
-hls:
-  enabled: no
-
-webrtc:
-  enabled: no
-
-paths:
-  # External incoming stream — any protocol
-  "{ingest_path_name}":
-    runOnPublish: >-
-      curl -sf {webhook}/hook/publish
-      -d "path=$MTX_PATH&conn_type=$MTX_CONN_TYPE&conn_id=$MTX_CONN_ID"
-    runOnPublishRestart: no
-    runOnUnpublish: >-
-      curl -sf {webhook}/hook/unpublish
-      -d "path=$MTX_PATH&conn_id=$MTX_CONN_ID"
-
-  # Compositor output — internal only, protected by token
-  composite:
-    publishUser: internal
-    publishPass: "{token}"
-    maxReaders: 5
-
-  # Relay path — mediamtx automatically reads from composite and serves it
-  # Output FFmpeg reads from here; brief gaps during compositor restart
-  # are absorbed by sourceReconnectPeriod
-  relay:
-    source: rtsp://127.0.0.1:{cfg.internal_rtsp_port}/composite
-    sourceReconnectPeriod: 500ms
-"""
-    return config_yaml.strip()
+    config_yaml = (
+        f"logLevel: warn\n"
+        f"logDestinations: [stdout]\n"
+        f"\n"
+        f"api: yes\n"
+        f"apiAddress: 127.0.0.1:{cfg.mediamtx_api_port}\n"
+        f"\n"
+        f"rtmp:\n"
+        f"  enabled: yes\n"
+        f"  address: :{cfg.internal_rtmp_port}\n"
+        f"\n"
+        f"rtsp:\n"
+        f"  enabled: yes\n"
+        f"  address: :{cfg.internal_rtsp_port}\n"
+        f"  protocols: [tcp]\n"
+        f"\n"
+        f"srt:\n"
+        f"  enabled: yes\n"
+        f"  address: :{cfg.ingest.srt_port}\n"
+        f"\n"
+        f"hls:\n"
+        f"  enabled: no\n"
+        f"\n"
+        f"webrtc:\n"
+        f"  enabled: no\n"
+        f"\n"
+        f"paths:\n"
+        f"  {ingest_path_name}:\n"
+        f"\n"
+        f"  composite:\n"
+        f"    publishUser: internal\n"
+        f"    publishPass: {token}\n"
+        f"\n"
+        f"  relay:\n"
+        f"    source: rtsp://127.0.0.1:{cfg.internal_rtsp_port}/composite\n"
+        f"    sourceReconnectPeriod: 500ms\n"
+    )
+    return config_yaml
 
 
 class MediamtxManager:
@@ -95,14 +82,12 @@ class MediamtxManager:
     async def start(self) -> None:
         config_content = generate_mediamtx_config(self.cfg)
 
-        # Write config to a temp file (will be cleaned up on stop)
         fd, path = tempfile.mkstemp(suffix=".yml", prefix="mediamtx-")
         self._config_file = path
         with os.fdopen(fd, "w") as f:
             f.write(config_content)
 
-        log.debug("mediamtx config written to %s", path)
-        log.debug("Config:\n%s", config_content)
+        log.debug("mediamtx config written to %s:\n%s", path, config_content)
 
         self._proc = await asyncio.create_subprocess_exec(
             MEDIAMTX_BIN, path,
@@ -112,8 +97,8 @@ class MediamtxManager:
         asyncio.create_task(self._log_output())
         log.info("mediamtx started (pid=%d)", self._proc.pid)
 
-    async def wait_ready(self, timeout: float = 10.0) -> bool:
-        """Poll mediamtx API until it responds, or timeout."""
+    async def wait_ready(self, timeout: float = 15.0) -> bool:
+        """Poll mediamtx API until it responds."""
         import urllib.request
         deadline = asyncio.get_event_loop().time() + timeout
         url = f"http://127.0.0.1:{self.cfg.mediamtx_api_port}/v3/paths/list"
@@ -126,7 +111,6 @@ class MediamtxManager:
                 return True
             except Exception:
                 await asyncio.sleep(0.5)
-        log.error("mediamtx did not become ready within %.1fs", timeout)
         return False
 
     async def stop(self) -> None:

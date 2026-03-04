@@ -73,22 +73,11 @@ class Config:
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
-    # Internal ports (not user-configurable, set by entrypoint)
+    # Internal ports (not user-configurable)
     internal_rtsp_port: int = 8554
     internal_rtmp_port: int = 1935
-    webhook_port: int = 8888
     mediamtx_api_port: int = 9997
     internal_token: str = ""  # random token for internal RTMP auth
-
-
-def _get(d: dict, *keys, default=None):
-    for k in keys:
-        if not isinstance(d, dict):
-            return default
-        d = d.get(k, None)
-        if d is None:
-            return default
-    return d if d is not None else default
 
 
 def load_config(path: str) -> Config:

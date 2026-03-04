@@ -2,8 +2,8 @@
 """
 immortal-stream — fault-tolerant live streaming with 3-layer compositing.
 
-Entry point: loads config, starts mediamtx, webhook server,
-compositor and output FFmpeg processes.
+Entry point: loads config, starts mediamtx, stream manager (which polls
+the mediamtx API for stream events), compositor and output FFmpeg processes.
 """
 import asyncio
 import logging
@@ -15,7 +15,6 @@ from config import load_config
 from mediamtx_manager import MediamtxManager
 from stream_manager import StreamManager
 from telegram import TelegramNotifier, NoopNotifier
-from webhook import WebhookServer
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -70,12 +69,9 @@ async def main() -> None:
         sys.exit(1)
 
     # ------------------------------------------------------------------ #
-    #  Stream manager + webhook server                                     #
+    #  Stream manager (polls mediamtx API for stream events)              #
     # ------------------------------------------------------------------ #
     manager = StreamManager(cfg, notifier)
-    webhook = WebhookServer(cfg.webhook_port, manager, cfg)
-    webhook.start()
-
     await manager.start()
 
     # ------------------------------------------------------------------ #
