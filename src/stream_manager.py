@@ -67,10 +67,15 @@ class StreamManager:
 
     async def start(self) -> None:
         self._running = True
-        log.info("Starting output FFmpeg (persistent)")
-        await self._start_output()
+        # Compositor MUST start first so it registers the composite path in
+        # mediamtx before the output FFmpeg tries to read from it.
+        # _start_compositor_idle internally waits COMPOSITOR_GRACE seconds,
+        # which is enough for FFmpeg to connect to mediamtx and push the
+        # first frame (path becomes ready).
         log.info("Starting compositor in IDLE mode")
         await self._start_compositor_idle()
+        log.info("Starting output FFmpeg (persistent)")
+        await self._start_output()
         asyncio.create_task(self._poll_loop())
         asyncio.create_task(self._watchdog())
 
@@ -346,6 +351,18 @@ class StreamManager:
         while self._running:
             await asyncio.sleep(5)
 
+            # Compositor FIRST: restarting it waits COMPOSITOR_GRACE so the
+            # path is registered in mediamtx before we (re)start the output.
+            # If both crashed simultaneously, this ordering ensures the output
+            # restart always finds a live path — no 400 Bad Request.
+            if self._compositor and self._compositor.returncode is not None:
+                rc = self._compositor.returncode
+                log.warning("Compositor exited (code %d) — restarting", rc)
+                if self._current_stream:
+                    await self._start_compositor_live(self._current_stream)
+                else:
+                    await self._start_compositor_idle()
+
             if self._output and self._output.returncode is not None:
                 rc = self._output.returncode
                 log.error("Output FFmpeg exited (code %d) — restarting", rc)
@@ -354,14 +371,6 @@ class StreamManager:
                     "Restarting…"
                 )
                 await self._start_output()
-
-            if self._compositor and self._compositor.returncode is not None:
-                rc = self._compositor.returncode
-                log.warning("Compositor exited (code %d) — restarting", rc)
-                if self._current_stream:
-                    await self._start_compositor_live(self._current_stream)
-                else:
-                    await self._start_compositor_idle()
 
     # ------------------------------------------------------------------ #
     #  Helpers                                                             #
