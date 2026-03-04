@@ -1,16 +1,31 @@
 """
 mediamtx process manager.
 
-Config philosophy: use the absolute minimum fields to avoid breaking on
-mediamtx version differences. No `paths:` section — mediamtx creates paths
-dynamically on first publish/subscribe. The compositor uses a secret random
-path name (cfg.composite_path) instead of per-path auth credentials.
+Detects the installed mediamtx version at startup and generates a compatible
+YAML configuration.  Two formats are supported:
+
+  v1.x  (mediamtx ≥ 1.0)  — nested objects:
+      rtmp:
+        enabled: yes
+        address: :1935
+
+  v0.x  (rtsp-simple-server / mediamtx < 1.0)  — flat keys:
+      rtmpEnabled: yes
+      rtmpAddress: :1935
+
+Version is detected by running `mediamtx --version` before the process is
+started.  If detection fails, v1.x is assumed (matches the Containerfile ARG).
+
+The compositor uses a secret random path name (cfg.composite_path) so no
+per-path auth credentials are needed regardless of version.
 """
 import asyncio
 import logging
 import os
+import re
+import subprocess
 import tempfile
-from typing import Optional
+from typing import Optional, Tuple
 
 from config import Config
 
@@ -19,16 +34,39 @@ log = logging.getLogger("mediamtx")
 MEDIAMTX_BIN = os.environ.get("MEDIAMTX_BIN", "/usr/local/bin/mediamtx")
 
 
-def generate_mediamtx_config(cfg: Config) -> str:
-    """
-    Generate a minimal mediamtx YAML configuration.
+# ── Version detection ──────────────────────────────────────────────────────────
 
-    Only sets the fields that are stable across mediamtx v1.x versions:
-    - log level / destinations
-    - API address (for our polling)
-    - protocol enable/disable and listen addresses
-    No `paths:` section — paths are created dynamically by mediamtx.
+def _detect_version(bin_path: str) -> Tuple[int, int]:
     """
+    Run ``mediamtx --version`` and return (major, minor).
+    Returns (1, 0) when detection fails (assumes latest format).
+    """
+    try:
+        result = subprocess.run(
+            [bin_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        text = result.stdout + result.stderr
+        m = re.search(r"v?(\d+)\.(\d+)", text)
+        if m:
+            major, minor = int(m.group(1)), int(m.group(2))
+            log.info("mediamtx version: v%d.%d", major, minor)
+            return major, minor
+        log.warning("cannot parse mediamtx version from output: %r", text[:200])
+    except FileNotFoundError:
+        log.error("mediamtx binary not found at %s", bin_path)
+    except Exception as e:
+        log.warning("mediamtx version detection failed: %s", e)
+    log.info("assuming mediamtx v1.x config format")
+    return 1, 0
+
+
+# ── Config generators ──────────────────────────────────────────────────────────
+
+def _gen_config_v1(cfg: Config) -> str:
+    """mediamtx ≥ v1.0 — nested object fields."""
     return (
         "logLevel: warn\n"
         "logDestinations: [stdout]\n"
@@ -57,6 +95,37 @@ def generate_mediamtx_config(cfg: Config) -> str:
     )
 
 
+def _gen_config_v0(cfg: Config) -> str:
+    """rtsp-simple-server / mediamtx v0.x — flat XxxEnabled keys."""
+    return (
+        "logLevel: warn\n"
+        "logDestinations: [stdout]\n"
+        "\n"
+        "apiEnabled: yes\n"
+        f"apiAddress: 127.0.0.1:{cfg.mediamtx_api_port}\n"
+        "\n"
+        "rtmpEnabled: yes\n"
+        f"rtmpAddress: :{cfg.internal_rtmp_port}\n"
+        "\n"
+        "rtspEnabled: yes\n"
+        f"rtspAddress: :{cfg.internal_rtsp_port}\n"
+        "rtspProtocols: [tcp]\n"
+        "\n"
+        "srtEnabled: yes\n"
+        f"srtAddress: :{cfg.ingest.srt_port}\n"
+        "\n"
+        "hlsEnabled: no\n"
+        "webRTCEnabled: no\n"
+    )
+
+
+def generate_mediamtx_config(cfg: Config, bin_path: str = MEDIAMTX_BIN) -> str:
+    major, _ = _detect_version(bin_path)
+    return _gen_config_v1(cfg) if major >= 1 else _gen_config_v0(cfg)
+
+
+# ── Process manager ────────────────────────────────────────────────────────────
+
 class MediamtxManager:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -64,7 +133,7 @@ class MediamtxManager:
         self._config_file: Optional[str] = None
 
     async def start(self) -> None:
-        config_content = generate_mediamtx_config(self.cfg)
+        config_content = generate_mediamtx_config(self.cfg, MEDIAMTX_BIN)
 
         fd, path = tempfile.mkstemp(suffix=".yml", prefix="mediamtx-")
         self._config_file = path
@@ -82,11 +151,18 @@ class MediamtxManager:
         log.info("mediamtx started (pid=%d)", self._proc.pid)
 
     async def wait_ready(self, timeout: float = 15.0) -> bool:
-        """Poll mediamtx API until it responds or timeout expires."""
+        """Poll mediamtx API until it responds or the process dies or timeout."""
         import urllib.request
         url = f"http://127.0.0.1:{self.cfg.mediamtx_api_port}/v3/paths/list"
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
+            # Bail early if the process already died
+            if self._proc and self._proc.returncode is not None:
+                log.error(
+                    "mediamtx exited with code %d before becoming ready",
+                    self._proc.returncode,
+                )
+                return False
             try:
                 await asyncio.get_event_loop().run_in_executor(
                     None, lambda: urllib.request.urlopen(url, timeout=1)
@@ -115,4 +191,7 @@ class MediamtxManager:
             line = await self._proc.stdout.readline()
             if not line:
                 break
-            log.debug("[mediamtx] %s", line.decode(errors="replace").rstrip())
+            decoded = line.decode(errors="replace").rstrip()
+            # Surface config errors at WARNING so they're visible without DEBUG
+            level = logging.WARNING if "ERR" in decoded else logging.DEBUG
+            log.log(level, "[mediamtx] %s", decoded)

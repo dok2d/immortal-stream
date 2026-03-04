@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional, Dict
@@ -89,12 +90,18 @@ class StreamManager:
 
     async def _poll_loop(self) -> None:
         """
-        Poll the mediamtx /v3/paths/list API every POLL_INTERVAL seconds.
-        Detect publisher connect/disconnect and call on_stream_start/stop.
+        Poll the mediamtx paths API every POLL_INTERVAL seconds.
+
+        Tries /v3/paths/list first (mediamtx v1.x); falls back to
+        /v1/paths/list (rtsp-simple-server / mediamtx v0.x) on 404.
+
+        Response formats handled:
+          v1.x  items = list  [{"name":…, "ready": true, "source":{…}}]
+          v0.x  items = dict  {"path_name": {"sourceReady": true, …}}
         """
-        api_url = (
-            f"http://127.0.0.1:{self.cfg.mediamtx_api_port}/v3/paths/list"
-        )
+        base = f"http://127.0.0.1:{self.cfg.mediamtx_api_port}"
+        api_url = f"{base}/v3/paths/list"
+
         while self._running:
             await asyncio.sleep(POLL_INTERVAL)
             try:
@@ -103,23 +110,44 @@ class StreamManager:
                     lambda: urllib.request.urlopen(api_url, timeout=2).read(),
                 )
                 data = json.loads(raw)
+            except urllib.error.HTTPError as e:
+                if e.code == 404 and "v3" in api_url:
+                    api_url = f"{base}/v1/paths/list"
+                    log.info("mediamtx API v3 not found, switched to v1")
+                else:
+                    log.debug("mediamtx API poll error: %s", e)
+                continue
             except Exception as e:
                 log.debug("mediamtx API poll error: %s", e)
                 continue
 
-            # Build the current set of active ingest paths
-            # (exclude internal paths: composite, relay)
+            # Normalise both list (v1) and dict (v0) item formats
             active_now: Dict[str, dict] = {}
-            for item in data.get("items", []):
-                name: str = item.get("name", "")
-                if not self._is_ingest_path(name):
-                    continue
-                if item.get("ready", False) and item.get("source"):
-                    src = item["source"]
-                    active_now[name] = {
-                        "conn_type": src.get("type", "unknown"),
-                        "conn_id": src.get("id", ""),
-                    }
+            raw_items = data.get("items", [])
+
+            if isinstance(raw_items, dict):
+                # v0.x: {"path_name": {"sourceReady": true, "source": {…}}}
+                for name, item in raw_items.items():
+                    if not self._is_ingest_path(name):
+                        continue
+                    if item.get("sourceReady") or (item.get("ready") and item.get("source")):
+                        src = item.get("source") or {}
+                        active_now[name] = {
+                            "conn_type": src.get("type", "unknown"),
+                            "conn_id": src.get("id", ""),
+                        }
+            else:
+                # v1.x: [{"name": "…", "ready": true, "source": {…}}]
+                for item in raw_items:
+                    name: str = item.get("name", "")
+                    if not self._is_ingest_path(name):
+                        continue
+                    if item.get("ready") and item.get("source"):
+                        src = item["source"]
+                        active_now[name] = {
+                            "conn_type": src.get("type", "unknown"),
+                            "conn_id": src.get("id", ""),
+                        }
 
             # Detect new streams
             for path, info in active_now.items():
