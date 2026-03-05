@@ -461,6 +461,18 @@ class StreamManager:
         if not self.cfg.output.targets:
             log.info("No output targets configured — output FFmpeg not started")
             return
+
+        # Wait for compositor RTSP source to have streams before launching
+        relay_url = f"rtsp://127.0.0.1:{self.cfg.internal_rtsp_port}/{self.cfg.composite_path}"
+        for attempt in range(1, 6):
+            info = await self._probe(relay_url)
+            if info and info.get("has_video"):
+                break
+            log.info("Waiting for compositor RTSP source (%d/5)…", attempt)
+            await asyncio.sleep(2)
+        else:
+            log.warning("Compositor RTSP source still not ready — starting output anyway")
+
         try:
             cmd = build_output(self.cfg)
         except Exception as e:
