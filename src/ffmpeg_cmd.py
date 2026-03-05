@@ -130,6 +130,8 @@ def build_compositor_idle(cfg: Config) -> List[str]:
             f"y={y_expr}",
             f"fontsize={ph.font_size}",
             f"fontcolor={ph.font_color}@{ph.opacity:.3f}",
+            "borderw=2",
+            "bordercolor=white",
         ]
         filters.append(
             f"[0:v]drawtext={':'.join(opts)}[vout]"
@@ -233,6 +235,8 @@ def build_compositor_live(
                 f"y={ov.y}",
                 f"fontsize={ov.font_size}",
                 f"fontcolor={ov.font_color}@{ov.opacity:.3f}",
+                "borderw=2",
+                "bordercolor=white",
             ]
             filters.append(
                 f"[{last_v}]drawtext={':'.join(ov_opts)}[vwith_text]"
