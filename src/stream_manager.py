@@ -467,14 +467,14 @@ class StreamManager:
             log.error("Failed to build output command: %s", e)
             self.notifier.send(f"⚠️ Output FFmpeg build error: {e}")
             return
-        log.debug("Output FFmpeg cmd: %s", " ".join(cmd))
+        log.info("Output FFmpeg cmd: %s", " ".join(cmd))
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
         self._output = proc
-        asyncio.create_task(self._log_stderr(proc, "output"))
+        asyncio.create_task(self._log_stderr(proc, "output", level=logging.WARNING))
 
     # ------------------------------------------------------------------ #
     #  Watchdog                                                            #
@@ -565,7 +565,8 @@ class StreamManager:
 
     @staticmethod
     async def _log_stderr(
-        proc: asyncio.subprocess.Process, label: str
+        proc: asyncio.subprocess.Process, label: str,
+        level: int = logging.DEBUG,
     ) -> None:
         if not proc.stderr:
             return
@@ -573,7 +574,8 @@ class StreamManager:
             line = await proc.stderr.readline()
             if not line:
                 break
-            log.debug(
+            log.log(
+                level,
                 "[ffmpeg/%s] %s",
                 label,
                 line.decode(errors="replace").rstrip(),
