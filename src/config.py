@@ -35,6 +35,12 @@ class IngestConfig:
     srt_port: int = 8890
     stream_key_required: bool = False
     allowed_key: Optional[str] = None
+    # Ordered list of stream keys for redundant-source failover.
+    # First entry has highest priority; the compositor always uses the
+    # highest-priority stream that is currently connected.  When that stream
+    # drops, the system automatically switches to the next available one.
+    # Leave empty (default) to accept any single stream on live/* (legacy mode).
+    redundant_sources: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -97,6 +103,7 @@ def load_config(path: str) -> Config:
             srt_port=i.get("srt_port", 8890),
             stream_key_required=i.get("stream_key_required", False),
             allowed_key=i.get("allowed_key"),
+            redundant_sources=i.get("redundant_sources", []),
         )
 
     if "placeholder" in data:

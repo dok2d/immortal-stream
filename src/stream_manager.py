@@ -14,6 +14,12 @@ Architecture:
                                         mediamtx /relay
                                               ↓ (never restarts)
                                         Output FFmpeg → target services
+
+Redundancy:
+  Multiple input sources can be configured with priority ordering.
+  The compositor always uses the highest-priority active stream.
+  When that stream drops, the system automatically fails over to the
+  next available source; the output FFmpeg connection is never interrupted.
 """
 import asyncio
 import json
@@ -58,8 +64,10 @@ class StreamManager:
         self._current_stream: Optional[StreamInfo] = None
         self._lock = asyncio.Lock()
         self._running = False
-        # Paths currently known to have an active publisher
+        # Paths currently known to have an active publisher (from API poll)
         self._known_active: Dict[str, str] = {}  # path → conn_id
+        # All fully-probed active streams, including standby sources
+        self._active_streams: Dict[str, StreamInfo] = {}  # path → StreamInfo
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -172,10 +180,50 @@ class StreamManager:
 
     def _is_ingest_path(self, name: str) -> bool:
         """True for paths that correspond to external ingest streams."""
-        # Ignore internal compositor path (secret random name starting with _c)
+        # Always ignore the internal compositor path
         if name == self.cfg.composite_path or name.startswith("_c"):
             return False
+
+        sources = self.cfg.ingest.redundant_sources
+        if sources:
+            # In redundancy mode, only track explicitly configured source paths
+            allowed = {f"live/{s}" if s else "live" for s in sources}
+            return name in allowed
+
         return name.startswith("live")
+
+    # ------------------------------------------------------------------ #
+    #  Priority selection                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _select_best_stream(self) -> Optional[str]:
+        """
+        Return the path of the highest-priority active stream.
+
+        When redundant_sources is configured, priority follows the list order
+        (index 0 = highest priority).  When not configured, any active stream
+        is returned (first-come first-served legacy behaviour).
+        """
+        sources = self.cfg.ingest.redundant_sources
+        if not sources:
+            return next(iter(self._active_streams), None)
+
+        for source_key in sources:
+            path = f"live/{source_key}" if source_key else "live"
+            if path in self._active_streams:
+                return path
+        return None
+
+    def _priority_label(self, path: str) -> str:
+        """Human-readable priority rank for a path, e.g. '#1 (primary)'."""
+        sources = self.cfg.ingest.redundant_sources
+        if not sources:
+            return ""
+        for idx, key in enumerate(sources, start=1):
+            candidate = f"live/{key}" if key else "live"
+            if candidate == path:
+                return f"[#{idx} {key or 'default'}]"
+        return ""
 
     # ------------------------------------------------------------------ #
     #  Stream state transitions                                            #
@@ -185,12 +233,6 @@ class StreamManager:
         self, path: str, conn_type: str, conn_id: str
     ) -> None:
         async with self._lock:
-            if self._current_stream:
-                log.warning(
-                    "New stream on %s while %s is active — replacing",
-                    path, self._current_stream.path,
-                )
-
             info = StreamInfo(path=path, conn_type=conn_type, conn_id=conn_id)
             log.info(
                 "Stream started: path=%s type=%s id=%s", path, conn_type, conn_id
@@ -213,42 +255,117 @@ class StreamManager:
                 info.height = probe.get("height", 0)
                 info.fps = probe.get("fps", "unknown")
 
+            self._active_streams[path] = info
+
+            # Is this stream the highest-priority active source?
+            best_path = self._select_best_stream()
+            if best_path != path:
+                # A higher-priority stream is already compositing; park this
+                # one as a standby — it will be promoted automatically if the
+                # current stream drops.
+                current_label = (
+                    f"{self._current_stream.path} "
+                    f"{self._priority_label(self._current_stream.path)}"
+                    if self._current_stream else "placeholder"
+                )
+                log.info(
+                    "Stream %s registered as standby (current compositor: %s)",
+                    path, current_label,
+                )
+                self.notifier.send(
+                    "📡 <b>Standby stream connected</b>\n"
+                    f"Source: <code>{path}</code> "
+                    f"{self._priority_label(path)}\n"
+                    f"Protocol: {conn_type}\n"
+                    f"Video: {info.codec_video} "
+                    f"{info.width}×{info.height} @{info.fps}fps\n"
+                    f"Audio: {info.codec_audio if info.has_audio else 'none'}\n"
+                    f"Active: {current_label}"
+                )
+                return
+
+            # This is the best available stream — switch compositor to it
+            old_stream = self._current_stream
             self._current_stream = info
             await self._start_compositor_live(info)
 
-            self.notifier.send(
-                "🟢 <b>Stream started</b>\n"
-                f"Path: <code>{path}</code>\n"
-                f"Protocol: {conn_type}\n"
-                f"ID: <code>{conn_id}</code>\n"
-                f"Video: {info.codec_video} "
-                f"{info.width}×{info.height} @{info.fps}fps\n"
-                f"Audio: {info.codec_audio if info.has_audio else 'none'}"
-            )
+            if old_stream:
+                # Higher-priority source arrived — preempt the current one
+                log.info(
+                    "Higher-priority stream %s preempts %s",
+                    path, old_stream.path,
+                )
+                self.notifier.send(
+                    "🔄 <b>Stream switched (higher priority arrived)</b>\n"
+                    f"From: <code>{old_stream.path}</code> "
+                    f"{self._priority_label(old_stream.path)}\n"
+                    f"To: <code>{path}</code> "
+                    f"{self._priority_label(path)}\n"
+                    f"Protocol: {conn_type}\n"
+                    f"Video: {info.codec_video} "
+                    f"{info.width}×{info.height} @{info.fps}fps\n"
+                    f"Audio: {info.codec_audio if info.has_audio else 'none'}"
+                )
+            else:
+                self.notifier.send(
+                    "🟢 <b>Stream started</b>\n"
+                    f"Path: <code>{path}</code> "
+                    f"{self._priority_label(path)}\n"
+                    f"Protocol: {conn_type}\n"
+                    f"ID: <code>{conn_id}</code>\n"
+                    f"Video: {info.codec_video} "
+                    f"{info.width}×{info.height} @{info.fps}fps\n"
+                    f"Audio: {info.codec_audio if info.has_audio else 'none'}"
+                )
 
     async def on_stream_stop(self, path: str, conn_id: str) -> None:
         async with self._lock:
+            self._active_streams.pop(path, None)
+
             if not self._current_stream or self._current_stream.path != path:
-                log.debug(
-                    "Stop event for unknown/stale path %s, ignoring", path
+                # A standby source dropped — no compositor change needed
+                log.info("Standby stream dropped: path=%s", path)
+                self.notifier.send(
+                    "📡 <b>Standby stream disconnected</b>\n"
+                    f"Source: <code>{path}</code> "
+                    f"{self._priority_label(path)}"
                 )
                 return
 
             info = self._current_stream
-            self._current_stream = None
             duration = int(time.monotonic() - info.started_at)
             log.info(
                 "Stream stopped: path=%s duration=%ds", path, duration
             )
 
-            await self._start_compositor_idle()
-
-            self.notifier.send(
-                "🔴 <b>Stream stopped</b>\n"
-                f"Path: <code>{path}</code>\n"
-                f"Duration: {_fmt_duration(duration)}\n"
-                "Switched to placeholder"
-            )
+            # Try to fail over to the next best available stream
+            next_path = self._select_best_stream()
+            if next_path and next_path in self._active_streams:
+                next_info = self._active_streams[next_path]
+                self._current_stream = next_info
+                await self._start_compositor_live(next_info)
+                log.info(
+                    "Failover: %s → %s (was active %ds)", path, next_path, duration
+                )
+                self.notifier.send(
+                    "🔄 <b>Failover</b>\n"
+                    f"Lost: <code>{path}</code> "
+                    f"{self._priority_label(path)} "
+                    f"(after {_fmt_duration(duration)})\n"
+                    f"Now using: <code>{next_path}</code> "
+                    f"{self._priority_label(next_path)}\n"
+                    f"Video: {next_info.codec_video} "
+                    f"{next_info.width}×{next_info.height} @{next_info.fps}fps"
+                )
+            else:
+                self._current_stream = None
+                await self._start_compositor_idle()
+                self.notifier.send(
+                    "🔴 <b>Stream stopped</b>\n"
+                    f"Path: <code>{path}</code>\n"
+                    f"Duration: {_fmt_duration(duration)}\n"
+                    "Switched to placeholder"
+                )
 
     # ------------------------------------------------------------------ #
     #  Public hot-reload API (called by Telegram bot)                      #

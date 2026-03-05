@@ -7,14 +7,17 @@ Fault-tolerant live streaming relay with 3-layer compositing, designed to keep t
 ## How it works
 
 ```
-External stream (any format)
-        │  RTMP / RTSP / SRT
+ Primary stream  ─┐
+ Backup stream   ─┤  RTMP / RTSP / SRT
+ Emergency stream─┘
+        │
         ▼
-  ┌─────────────┐    webhook    ┌──────────────────────┐
-  │  mediamtx   │──────────────▶  Python orchestrator  │
-  │  (ingest)   │              └──────────┬───────────┘
-  └─────────────┘                         │ manages
-                                          ▼
+  ┌─────────────┐  API poll   ┌──────────────────────┐
+  │  mediamtx   │────────────▶  Python orchestrator  │
+  │  (ingest)   │             └──────────┬───────────┘
+  └─────────────┘                        │ priority selection
+                                         │ + failover
+                                         ▼
                               ┌────────────────────────┐
   Placeholder ──────────────▶ │   Compositor FFmpeg    │
   Overlay     ──────────────▶ │   (3-layer composite)  │
@@ -98,6 +101,26 @@ ingest:
 ```
 
 When `stream_key_required: true`, only streams published to `rtmp://host:1935/live/<allowed_key>` are accepted. All others receive a 403 rejection.
+
+### `ingest.redundant_sources` — redundant input with automatic failover
+
+```yaml
+ingest:
+  redundant_sources:
+    - primary    # rtmp://host:1935/live/primary   (highest priority)
+    - backup     # rtmp://host:1935/live/backup
+    - emergency  # rtmp://host:1935/live/emergency (lowest priority)
+```
+
+When `redundant_sources` is set, the orchestrator tracks all listed sources simultaneously and always composites the **highest-priority source that is currently connected**:
+
+- All sources can be connected at the same time. Lower-priority ones stay on standby and do not consume compositor resources.
+- If the active source disconnects, the system **instantly fails over** to the next available source — the output FFmpeg process never restarts and the RTMP connection to YouTube/Twitch is uninterrupted.
+- When a higher-priority source reconnects, it is **immediately promoted** back to the compositor.
+
+Telegram notifications report every standby connect/disconnect, every preemption, and every failover event.
+
+Leave `redundant_sources` empty (default) to accept any single stream on `/live/*` (legacy first-come behaviour).
 
 ### `placeholder`
 

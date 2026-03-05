@@ -34,6 +34,25 @@ ingest:
   stream_key_required: false
   allowed_key: ""        # e.g. "mysecretkey123"
 
+  # ── Redundant sources (optional) ───────────────────────────────────
+  # Define multiple named input sources ordered by priority (first = highest).
+  # Each source connects to a distinct RTMP/SRT path:
+  #   rtmp://host:1935/live/<name>
+  #
+  # The compositor always uses the highest-priority source that is currently
+  # connected.  When that source drops, the system automatically fails over
+  # to the next available one — without restarting the output FFmpeg process
+  # or interrupting the connection to YouTube / Twitch / etc.
+  #
+  # When the primary source reconnects it is immediately promoted back.
+  #
+  # Leave empty (default) to accept any single stream on /live/* (legacy mode).
+  redundant_sources: []
+  # redundant_sources:
+  #   - primary    # connect as rtmp://host:1935/live/primary   (highest priority)
+  #   - backup     # connect as rtmp://host:1935/live/backup
+  #   - emergency  # connect as rtmp://host:1935/live/emergency (lowest priority)
+
 
 # ── Placeholder layer ──────────────────────────────────────────────────────────
 # Shown to the target service whenever no incoming stream is active.
