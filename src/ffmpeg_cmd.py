@@ -2,6 +2,9 @@
 from typing import List
 from config import Config
 
+# Default font for drawtext when no font_path is configured.
+DEFAULT_FONT = "/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
+
 
 def _bufsize(bitrate: str) -> str:
     """2× bitrate as bufsize string (e.g. '6000k' → '12000k')."""
@@ -116,9 +119,8 @@ def build_compositor_idle(cfg: Config) -> List[str]:
             f"anullsrc=r={a.sample_rate}:cl=stereo",
         ]
         escaped = _escape_drawtext(ph.text)
-        opts = []
-        if ph.font_path:
-            opts.append(f"fontfile='{ph.font_path}'")
+        font = ph.font_path or DEFAULT_FONT
+        opts = [f"fontfile='{font}'"]
         # Center text by default if x=0 and y=0
         x_expr = str(ph.x) if ph.x else "(w-text_w)/2"
         y_expr = str(ph.y) if ph.y else "(h-text_h)/2"
@@ -223,9 +225,8 @@ def build_compositor_live(
 
         elif ov.type == "text" and ov.text:
             escaped = _escape_drawtext(ov.text)
-            ov_opts = []
-            if ov.font_path:
-                ov_opts.append(f"fontfile='{ov.font_path}'")
+            ov_font = ov.font_path or DEFAULT_FONT
+            ov_opts = [f"fontfile='{ov_font}'"]
             ov_opts += [
                 f"text={escaped}",
                 f"x={ov.x}",

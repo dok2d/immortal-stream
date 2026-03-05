@@ -428,7 +428,22 @@ class StreamManager:
         await self._replace_compositor(cmd, f"LIVE({info.path})")
 
     async def _replace_compositor(self, cmd: list, label: str) -> None:
-        """Start new compositor, wait for it to stabilise, then kill the old one."""
+        """Stop old compositor, then start the new one.
+
+        mediamtx does not handle two simultaneous RTMP publishers on the
+        same path gracefully — the path resets during the switch, causing
+        Broken pipe errors on both the compositor and the output FFmpeg.
+        Stopping the old publisher first avoids this race; the brief gap
+        is acceptable because the watchdog restarts the output if needed.
+        """
+        old = self._compositor
+        if old and old.returncode is None:
+            old.terminate()
+            try:
+                await asyncio.wait_for(old.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                old.kill()
+
         log.info("Starting compositor [%s]: %s", label, " ".join(cmd))
         new_proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -436,20 +451,11 @@ class StreamManager:
             stderr=asyncio.subprocess.PIPE,
         )
         asyncio.create_task(self._log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING))
-
-        # Allow new compositor to connect and push first frames before
-        # tearing down the old one (keeps the relay path continuously fed)
-        await asyncio.sleep(COMPOSITOR_GRACE)
-
-        old = self._compositor
         self._compositor = new_proc
 
-        if old and old.returncode is None:
-            old.terminate()
-            try:
-                await asyncio.wait_for(old.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                old.kill()
+        # Wait for the new compositor to connect to mediamtx and push
+        # first frames so the RTSP path is ready for the output FFmpeg.
+        await asyncio.sleep(COMPOSITOR_GRACE)
 
         log.info("Compositor switched to [%s]", label)
 

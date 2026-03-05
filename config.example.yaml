@@ -74,7 +74,7 @@ placeholder:
   # ── Text placeholder ─────────────────────────────────────────────
   # (used when type: text)
   # text: "Трансляция скоро начнётся"
-  # font_path: /media/fonts/DejaVuSans.ttf   # TTF/OTF font; system font if omitted
+  # font_path: /media/fonts/MyFont.ttf        # TTF/OTF font; JetBrains Mono used if omitted
   # font_size: 72
   # font_color: white                         # FFmpeg color name or #RRGGBB
 
@@ -102,7 +102,7 @@ overlay:
 
   # ── Text overlay ───────────────────────────────────────────────────
   text: "LIVE"
-  # font_path: /media/fonts/DejaVuSans.ttf   # TTF/OTF font; system font used if omitted
+  # font_path: /media/fonts/MyFont.ttf        # TTF/OTF font; JetBrains Mono used if omitted
   font_size: 48
   font_color: white                           # FFmpeg color name or #RRGGBB
 
