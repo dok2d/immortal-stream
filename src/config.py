@@ -8,8 +8,12 @@ import os
 
 @dataclass
 class PlaceholderConfig:
-    type: str = "black"       # black | image | video
+    type: str = "black"       # black | image | video | text
     path: Optional[str] = None
+    text: Optional[str] = None
+    font_path: Optional[str] = None
+    font_size: int = 72
+    font_color: str = "white"
     x: int = 0
     y: int = 0
     opacity: float = 1.0
@@ -33,6 +37,8 @@ class OverlayConfig:
 class IngestConfig:
     port: int = 1935
     srt_port: int = 8890
+    hls: bool = False
+    hls_port: int = 8888
     stream_key_required: bool = False
     allowed_key: Optional[str] = None
     # Ordered list of stream keys for redundant-source failover.
@@ -101,6 +107,8 @@ def load_config(path: str) -> Config:
         cfg.ingest = IngestConfig(
             port=i.get("port", 1935),
             srt_port=i.get("srt_port", 8890),
+            hls=i.get("hls", False),
+            hls_port=i.get("hls_port", 8888),
             stream_key_required=i.get("stream_key_required", False),
             allowed_key=i.get("allowed_key"),
             redundant_sources=i.get("redundant_sources", []),
@@ -111,6 +119,10 @@ def load_config(path: str) -> Config:
         cfg.placeholder = PlaceholderConfig(
             type=p.get("type", "black"),
             path=p.get("path"),
+            text=p.get("text"),
+            font_path=p.get("font_path"),
+            font_size=p.get("font_size", 72),
+            font_color=p.get("font_color", "white"),
             x=p.get("x", 0),
             y=p.get("y", 0),
             opacity=float(p.get("opacity", 1.0)),

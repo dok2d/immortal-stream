@@ -4,13 +4,13 @@ mediamtx process manager.
 Detects the installed mediamtx version at startup and generates a compatible
 YAML configuration.  Two formats are supported:
 
-  v1.x  (mediamtx ≥ 1.0)  — nested objects:
-      rtmp:
-        enabled: yes
-        address: :1935
+  v1.x  (mediamtx ≥ 1.0)  — flat top-level keys, YAML 1.2 booleans:
+      api: true
+      rtmpAddress: :1935
+      srt: true
 
-  v0.x  (rtsp-simple-server / mediamtx < 1.0)  — flat keys:
-      rtmpEnabled: yes
+  v0.x  (rtsp-simple-server / mediamtx < 1.0)  — flat XxxEnabled keys:
+      apiEnabled: yes
       rtmpAddress: :1935
 
 Version is detected by running `mediamtx --version` before the process is
@@ -66,21 +66,20 @@ def _detect_version(bin_path: str) -> Tuple[int, int]:
 # ── Config generators ──────────────────────────────────────────────────────────
 
 def _gen_config_v1(cfg: Config) -> str:
-    """mediamtx v1.x — flat top-level keys (no nested protocol objects).
+    """mediamtx v1.x — flat top-level keys (YAML 1.2 compliant).
 
-    RTMP and RTSP are on by default; configure only address.
-    SRT requires an explicit bool enable flag.
-    HLS and WebRTC are disabled by bool.
+    Uses true/false instead of yes/no for YAML 1.2 compatibility
+    (mediamtx ≥ v1.15 uses goccy/go-yaml which is YAML 1.2 strict).
     rtspTransports: [tcp] restricts RTSP transport to TCP for localhost
-    reliability (replaces the deprecated ``protocols`` key in v1.16+).
-    ``paths: all_others:`` enables dynamic path creation so the compositor
-    and external publishers can register arbitrary paths on the fly.
+    reliability.  ``paths: all_others:`` enables dynamic path creation
+    so the compositor and external publishers can register arbitrary paths.
     """
+    hls_enabled = "true" if cfg.ingest.hls else "false"
     return (
         "logLevel: warn\n"
         "logDestinations: [stdout]\n"
         "\n"
-        "api: yes\n"
+        "api: true\n"
         f"apiAddress: 127.0.0.1:{cfg.mediamtx_api_port}\n"
         "\n"
         f"rtmpAddress: :{cfg.internal_rtmp_port}\n"
@@ -88,11 +87,13 @@ def _gen_config_v1(cfg: Config) -> str:
         f"rtspAddress: :{cfg.internal_rtsp_port}\n"
         "rtspTransports: [tcp]\n"
         "\n"
-        "srt: yes\n"
+        "srt: true\n"
         f"srtAddress: :{cfg.ingest.srt_port}\n"
         "\n"
-        "hls: no\n"
-        "webrtc: no\n"
+        f"hls: {hls_enabled}\n"
+        f"hlsAddress: :{cfg.ingest.hls_port}\n"
+        "\n"
+        "webrtc: false\n"
         "\n"
         "pathDefaults:\n"
         "paths:\n"
@@ -102,6 +103,7 @@ def _gen_config_v1(cfg: Config) -> str:
 
 def _gen_config_v0(cfg: Config) -> str:
     """rtsp-simple-server / mediamtx v0.x — flat XxxEnabled keys."""
+    hls_enabled = "yes" if cfg.ingest.hls else "no"
     return (
         "logLevel: warn\n"
         "logDestinations: [stdout]\n"
@@ -119,7 +121,7 @@ def _gen_config_v0(cfg: Config) -> str:
         "srtEnabled: yes\n"
         f"srtAddress: :{cfg.ingest.srt_port}\n"
         "\n"
-        "hlsEnabled: no\n"
+        f"hlsEnabled: {hls_enabled}\n"
         "webRTCEnabled: no\n"
     )
 

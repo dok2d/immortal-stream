@@ -61,7 +61,8 @@ def _composite_dest(cfg: Config) -> str:
 def build_compositor_idle(cfg: Config) -> List[str]:
     """
     Compositor command for IDLE state (no incoming stream).
-    Outputs placeholder (black / image / video) to the internal composite path.
+    Outputs placeholder (black / image / video / text) to the internal
+    composite path.
     """
     v = cfg.output.video
     a = cfg.output.audio
@@ -85,6 +86,35 @@ def build_compositor_idle(cfg: Config) -> List[str]:
         ]
         cmd += _output_flags(cfg, dest)
         return cmd
+
+    elif ph.type == "text":
+        if not ph.text:
+            raise ValueError("placeholder.text is required for type=text")
+        cmd += [
+            "-f", "lavfi", "-i",
+            f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
+            "-f", "lavfi", "-i",
+            f"anullsrc=r={a.sample_rate}:cl=stereo",
+        ]
+        escaped = (
+            ph.text
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace(":", "\\:")
+        )
+        fp = f":fontfile='{ph.font_path}'" if ph.font_path else ""
+        # Center text by default if x=0 and y=0
+        x_expr = str(ph.x) if ph.x else "(w-text_w)/2"
+        y_expr = str(ph.y) if ph.y else "(h-text_h)/2"
+        filters.append(
+            f"[0:v]drawtext{fp}"
+            f":text='{escaped}'"
+            f":x={x_expr}:y={y_expr}"
+            f":fontsize={ph.font_size}"
+            f":fontcolor={ph.font_color}@{ph.opacity:.3f}"
+            f"[vout]"
+        )
+        audio_map = "1:a"
 
     elif ph.type == "image":
         if not ph.path:
@@ -222,8 +252,15 @@ def build_output(cfg: Config) -> List[str]:
     Output FFmpeg — reads the compositor output from mediamtx (RTSP),
     writes to all configured RTMP targets. This process NEVER restarts;
     it holds the persistent RTMP connection to the target services.
-    Brief reconnects to the composite path (< 2 s during compositor restart)
-    are handled by -reconnect flags; RTMP targets stay connected throughout.
+
+    Brief interruptions during compositor restarts (< 2 s) are handled by
+    the grace period overlap: the new compositor starts pushing before the
+    old one is terminated, so the RTSP path always has data.  If the
+    compositor crashes, the watchdog restarts both processes.
+
+    Note: -reconnect flags are HTTP(S)-only in FFmpeg and do not apply to
+    RTSP input.  The -stimeout flag controls how long FFmpeg waits on a
+    stalled RTSP connection before giving up (in microseconds).
     """
     relay_url = f"rtsp://127.0.0.1:{cfg.internal_rtsp_port}/{cfg.composite_path}"
     targets = cfg.output.targets
@@ -234,9 +271,7 @@ def build_output(cfg: Config) -> List[str]:
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats",
         "-rtsp_transport", "tcp",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
+        "-stimeout", "5000000",
         "-i", relay_url,
     ]
 

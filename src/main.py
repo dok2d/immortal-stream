@@ -87,10 +87,17 @@ async def main() -> None:
     #  Startup notification                                                #
     # ------------------------------------------------------------------ #
     target_list = "\n".join(f"  • {t}" for t in cfg.output.targets) or "  (none)"
+    hls_line = f"\nIngest HLS:  :{cfg.ingest.hls_port}" if cfg.ingest.hls else ""
+    key_line = (
+        f"\nStream key:  required ({cfg.ingest.allowed_key})"
+        if cfg.ingest.stream_key_required and cfg.ingest.allowed_key
+        else "\nStream key:  any"
+    )
     notifier.send(
         "✅ <b>immortal-stream started</b>\n"
         f"Ingest RTMP: :{cfg.ingest.port}\n"
-        f"Ingest SRT:  :{cfg.ingest.srt_port}\n"
+        f"Ingest SRT:  :{cfg.ingest.srt_port}"
+        f"{hls_line}{key_line}\n"
         f"Placeholder: {cfg.placeholder.type}\n"
         f"Overlay: {'enabled' if cfg.overlay.enabled else 'disabled'}\n"
         f"Targets:\n{target_list}"

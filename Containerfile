@@ -18,7 +18,7 @@ RUN apk add --no-cache \
     && rm -rf /var/cache/apk/*
 
 # ── mediamtx (single Go binary, minimal footprint) ────────────────────────────
-ARG MEDIAMTX_VERSION=v1.9.3
+ARG MEDIAMTX_VERSION=v1.16.1
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 RUN curl -fsSL \
@@ -49,6 +49,8 @@ WORKDIR /app
 EXPOSE 1935/tcp
 # SRT ingest (external)
 EXPOSE 8890/udp
+# HLS ingest (optional, enable in config)
+EXPOSE 8888/tcp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -sf http://127.0.0.1:9997/v3/paths/list > /dev/null || exit 1

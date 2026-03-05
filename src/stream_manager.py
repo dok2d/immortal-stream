@@ -45,6 +45,7 @@ class StreamInfo:
     path: str
     conn_type: str
     conn_id: str
+    remote_addr: str = "unknown"
     has_audio: bool = False
     has_video: bool = True
     codec_video: str = "unknown"
@@ -148,6 +149,7 @@ class StreamManager:
                         active_now[name] = {
                             "conn_type": src.get("type", "unknown"),
                             "conn_id": src.get("id", ""),
+                            "remote_addr": _extract_remote_addr(src),
                         }
             else:
                 # v1.x: [{"name": "…", "ready": true, "source": {…}}]
@@ -160,6 +162,7 @@ class StreamManager:
                         active_now[name] = {
                             "conn_type": src.get("type", "unknown"),
                             "conn_id": src.get("id", ""),
+                            "remote_addr": _extract_remote_addr(src),
                         }
 
             # Detect new streams
@@ -168,7 +171,8 @@ class StreamManager:
                     self._known_active[path] = info["conn_id"]
                     asyncio.create_task(
                         self.on_stream_start(
-                            path, info["conn_type"], info["conn_id"]
+                            path, info["conn_type"], info["conn_id"],
+                            info["remote_addr"],
                         )
                     )
 
@@ -189,6 +193,10 @@ class StreamManager:
             # In redundancy mode, only track explicitly configured source paths
             allowed = {f"live/{s}" if s else "live" for s in sources}
             return name in allowed
+
+        # Stream key filtering: only accept streams with the correct key
+        if self.cfg.ingest.stream_key_required and self.cfg.ingest.allowed_key:
+            return name == f"live/{self.cfg.ingest.allowed_key}"
 
         return name.startswith("live")
 
@@ -230,12 +238,17 @@ class StreamManager:
     # ------------------------------------------------------------------ #
 
     async def on_stream_start(
-        self, path: str, conn_type: str, conn_id: str
+        self, path: str, conn_type: str, conn_id: str,
+        remote_addr: str = "unknown",
     ) -> None:
         async with self._lock:
-            info = StreamInfo(path=path, conn_type=conn_type, conn_id=conn_id)
+            info = StreamInfo(
+                path=path, conn_type=conn_type, conn_id=conn_id,
+                remote_addr=remote_addr,
+            )
             log.info(
-                "Stream started: path=%s type=%s id=%s", path, conn_type, conn_id
+                "Stream started: path=%s type=%s id=%s remote=%s",
+                path, conn_type, conn_id, remote_addr,
             )
 
             # Give mediamtx a moment to expose the path via RTSP
@@ -276,6 +289,7 @@ class StreamManager:
                     "📡 <b>Standby stream connected</b>\n"
                     f"Source: <code>{path}</code> "
                     f"{self._priority_label(path)}\n"
+                    f"Remote: <code>{remote_addr}</code>\n"
                     f"Protocol: {conn_type}\n"
                     f"Video: {info.codec_video} "
                     f"{info.width}×{info.height} @{info.fps}fps\n"
@@ -301,6 +315,7 @@ class StreamManager:
                     f"{self._priority_label(old_stream.path)}\n"
                     f"To: <code>{path}</code> "
                     f"{self._priority_label(path)}\n"
+                    f"Remote: <code>{remote_addr}</code>\n"
                     f"Protocol: {conn_type}\n"
                     f"Video: {info.codec_video} "
                     f"{info.width}×{info.height} @{info.fps}fps\n"
@@ -311,6 +326,7 @@ class StreamManager:
                     "🟢 <b>Stream started</b>\n"
                     f"Path: <code>{path}</code> "
                     f"{self._priority_label(path)}\n"
+                    f"Remote: <code>{remote_addr}</code>\n"
                     f"Protocol: {conn_type}\n"
                     f"ID: <code>{conn_id}</code>\n"
                     f"Video: {info.codec_video} "
@@ -572,3 +588,20 @@ def _fmt_duration(secs: int) -> str:
     if m:
         return f"{m}m {s}s"
     return f"{s}s"
+
+
+def _extract_remote_addr(source: dict) -> str:
+    """Extract the remote IP/address from a mediamtx API source object.
+
+    The source 'id' field typically looks like:
+      "rtmpConn 192.168.1.5:52341"   or  "srtConn 10.0.0.1:9999"
+    We extract the IP:port part.  Falls back to the raw id or 'unknown'.
+    """
+    raw_id = source.get("id", "")
+    if not raw_id:
+        return "unknown"
+    # Try to extract the address part after the type prefix
+    parts = raw_id.split()
+    if len(parts) >= 2:
+        return parts[-1]
+    return raw_id

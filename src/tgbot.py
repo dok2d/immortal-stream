@@ -9,6 +9,7 @@ Commands
 --------
 /status                          — current state
 /placeholder black               — black screen
+/placeholder text <text>         — text placeholder
 /placeholder image <path>        — image placeholder (JPEG/PNG)
 /placeholder video <path>        — video placeholder (loops)
 /placeholder opacity <0.0-1.0>   — placeholder opacity
@@ -182,7 +183,9 @@ class TelegramBot:
             state = "⚫ <b>IDLE</b> (placeholder active)"
 
         ph_desc = ph.type
-        if ph.path:
+        if ph.type == "text" and ph.text:
+            ph_desc += f": <code>{ph.text}</code>"
+        elif ph.path:
             ph_desc += f": <code>{ph.path}</code>"
         if ph.opacity < 1.0:
             ph_desc += f" opacity={ph.opacity:.2f}"
@@ -221,6 +224,7 @@ class TelegramBot:
             return (
                 "Usage:\n"
                 "/placeholder black\n"
+                "/placeholder text <text>\n"
                 "/placeholder image <path>\n"
                 "/placeholder video <path>\n"
                 "/placeholder opacity <0.0–1.0>"
@@ -231,8 +235,19 @@ class TelegramBot:
         if sub == "black":
             self.cfg.placeholder.type = "black"
             self.cfg.placeholder.path = None
+            self.cfg.placeholder.text = None
             await self.manager.reload_compositor()
             return "✅ Placeholder → black screen"
+
+        if sub == "text":
+            text = arg_str[len("text"):].strip()
+            if not text:
+                return "Usage: /placeholder text <your text here>"
+            self.cfg.placeholder.type = "text"
+            self.cfg.placeholder.text = text
+            self.cfg.placeholder.path = None
+            await self.manager.reload_compositor()
+            return f"✅ Placeholder → text: <code>{text}</code>"
 
         if sub in ("image", "video"):
             path = arg_str[len(sub):].strip()
@@ -242,6 +257,7 @@ class TelegramBot:
                 return f"❌ File not found: <code>{path}</code>"
             self.cfg.placeholder.type = sub
             self.cfg.placeholder.path = path
+            self.cfg.placeholder.text = None
             await self.manager.reload_compositor()
             return f"✅ Placeholder → {sub}: <code>{path}</code>"
 
@@ -500,6 +516,7 @@ _HELP_TEXT = (
     "/status — current stream state and settings\n\n"
     "<b>Placeholder</b> (shown when no stream)\n"
     "/placeholder black\n"
+    "/placeholder text <i>text</i>\n"
     "/placeholder image <i>path</i>\n"
     "/placeholder video <i>path</i>\n"
     "/placeholder opacity <i>0.0–1.0</i>\n\n"
