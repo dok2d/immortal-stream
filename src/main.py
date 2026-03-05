@@ -17,9 +17,8 @@ from stream_manager import StreamManager
 from telegram import TelegramNotifier, NoopNotifier
 from tgbot import TelegramBot
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -37,6 +36,10 @@ async def main() -> None:
     except Exception as e:
         log.critical("Failed to load config from %s: %s", CONFIG_PATH, e)
         sys.exit(1)
+
+    # Apply log level from config (or LOG_LEVEL env var fallback)
+    level = getattr(logging, cfg.log_level, logging.INFO)
+    logging.getLogger().setLevel(level)
 
     log.info(
         "Config loaded: ingest=%d, srt=%d, targets=%d, placeholder=%s",

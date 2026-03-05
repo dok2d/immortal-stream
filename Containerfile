@@ -15,6 +15,8 @@ RUN apk add --no-cache \
         curl \
         ca-certificates \
         tzdata \
+        font-dejavu \
+        fontconfig \
     && rm -rf /var/cache/apk/*
 
 # ── mediamtx (single Go binary, minimal footprint) ────────────────────────────

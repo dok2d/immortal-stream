@@ -81,6 +81,7 @@ class TelegramConfig:
 
 @dataclass
 class Config:
+    log_level: str = "INFO"
     ingest: IngestConfig = field(default_factory=IngestConfig)
     placeholder: PlaceholderConfig = field(default_factory=PlaceholderConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
@@ -101,6 +102,12 @@ def load_config(path: str) -> Config:
         data = yaml.safe_load(f) or {}
 
     cfg = Config()
+
+    # log_level: config file takes precedence over LOG_LEVEL env var
+    if "log_level" in data:
+        cfg.log_level = str(data["log_level"]).upper()
+    else:
+        cfg.log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 
     if "ingest" in data:
         i = data["ingest"]

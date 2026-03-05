@@ -20,6 +20,12 @@
 #   - Targets: empty (add via /target add or Telegram bot)
 
 
+# ── General ───────────────────────────────────────────────────────────────────
+# Log level: DEBUG, INFO, WARNING, ERROR.
+# Can also be set via LOG_LEVEL env var; config file takes precedence.
+log_level: INFO
+
+
 # ── Ingest ─────────────────────────────────────────────────────────────────────
 ingest:
   # TCP port for RTMP / RTSP ingestion.
