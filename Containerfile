@@ -15,10 +15,22 @@ RUN apk add --no-cache \
         curl \
         ca-certificates \
         tzdata \
+        fontconfig \
+        unzip \
     && rm -rf /var/cache/apk/*
 
+# ── JetBrains Mono font (supports Latin, Cyrillic, Greek) ────────────────────
+ARG JBMONO_VERSION=2.304
+RUN mkdir -p /usr/share/fonts/jetbrains-mono \
+    && curl -fsSL \
+       "https://github.com/JetBrains/JetBrainsMono/releases/download/v${JBMONO_VERSION}/JetBrainsMono-${JBMONO_VERSION}.zip" \
+       -o /tmp/jbmono.zip \
+    && unzip -j /tmp/jbmono.zip "fonts/ttf/*.ttf" -d /usr/share/fonts/jetbrains-mono/ \
+    && rm /tmp/jbmono.zip \
+    && fc-cache -f
+
 # ── mediamtx (single Go binary, minimal footprint) ────────────────────────────
-ARG MEDIAMTX_VERSION=v1.9.3
+ARG MEDIAMTX_VERSION=v1.16.1
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 RUN curl -fsSL \
@@ -49,6 +61,8 @@ WORKDIR /app
 EXPOSE 1935/tcp
 # SRT ingest (external)
 EXPOSE 8890/udp
+# HLS ingest (optional, enable in config)
+EXPOSE 8888/tcp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -sf http://127.0.0.1:9997/v3/paths/list > /dev/null || exit 1

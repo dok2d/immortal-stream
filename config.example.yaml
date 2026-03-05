@@ -20,6 +20,12 @@
 #   - Targets: empty (add via /target add or Telegram bot)
 
 
+# ── General ───────────────────────────────────────────────────────────────────
+# Log level: DEBUG, INFO, WARNING, ERROR.
+# Can also be set via LOG_LEVEL env var; config file takes precedence.
+log_level: INFO
+
+
 # ── Ingest ─────────────────────────────────────────────────────────────────────
 ingest:
   # TCP port for RTMP / RTSP ingestion.
@@ -27,6 +33,10 @@ ingest:
 
   # UDP port for SRT ingestion.
   srt_port: 8890
+
+  # HLS ingest (disabled by default for security; enable if needed).
+  hls: false
+  hls_port: 8888
 
   # Set to true to only accept streams whose path ends with `allowed_key`.
   # Connect as: rtmp://host:1935/live/<allowed_key>
@@ -57,13 +67,25 @@ ingest:
 # ── Placeholder layer ──────────────────────────────────────────────────────────
 # Shown to the target service whenever no incoming stream is active.
 placeholder:
-  # Type: black | image | video
+  # Type: black | text | image | video
   # "black" requires no files — good for testing out of the box.
   type: black
 
+  # ── Text placeholder ─────────────────────────────────────────────
+  # (used when type: text)
+  # text: "Трансляция скоро начнётся"
+  # font_path: /media/fonts/MyFont.ttf        # TTF/OTF font; JetBrains Mono used if omitted
+  # font_size: 72
+  # font_color: white                         # FFmpeg color name or #RRGGBB
+
+  # ── Image/video placeholder ──────────────────────────────────────
   # Path to the placeholder file (image: JPEG/PNG, video: any FFmpeg-readable).
   # Required only when type is image or video.
   # path: /media/placeholder.jpg
+
+  # Position (pixels from top-left). For text: 0,0 = centered.
+  x: 0
+  y: 0
 
   # Opacity 0.0 (transparent) … 1.0 (opaque).
   opacity: 1.0
@@ -80,7 +102,7 @@ overlay:
 
   # ── Text overlay ───────────────────────────────────────────────────
   text: "LIVE"
-  # font_path: /media/fonts/DejaVuSans.ttf   # TTF/OTF font; system font used if omitted
+  # font_path: /media/fonts/MyFont.ttf        # TTF/OTF font; JetBrains Mono used if omitted
   font_size: 48
   font_color: white                           # FFmpeg color name or #RRGGBB
 
@@ -122,13 +144,14 @@ output:
 
 
 # ── Telegram notifications + bot ───────────────────────────────────────────────
-# Receive detailed event notifications in a Telegram chat.
-# The same bot token also enables runtime configuration commands.
-# Events: stream started/stopped, process restarts, errors.
+# Receive detailed event notifications in a Telegram chat (with IP, protocol,
+# codec, resolution info).  The same bot token enables runtime configuration.
+#
+# Events: stream started/stopped, failover, process restarts, errors.
 #
 # Bot commands (send to the configured chat):
 #   /status                    — current state and settings
-#   /placeholder black|image|video|opacity
+#   /placeholder black|text|image|video|opacity
 #   /overlay off|text|image|x|y|opacity|size|color
 #   /target list|add|remove|set
 #   /output bitrate|fps|size|preset

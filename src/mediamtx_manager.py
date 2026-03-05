@@ -4,13 +4,13 @@ mediamtx process manager.
 Detects the installed mediamtx version at startup and generates a compatible
 YAML configuration.  Two formats are supported:
 
-  v1.x  (mediamtx ≥ 1.0)  — nested objects:
-      rtmp:
-        enabled: yes
-        address: :1935
+  v1.x  (mediamtx >= 1.0)  — flat top-level keys, YAML 1.2 booleans:
+      api: true
+      rtmpAddress: :1935
+      srt: true
 
-  v0.x  (rtsp-simple-server / mediamtx < 1.0)  — flat keys:
-      rtmpEnabled: yes
+  v0.x  (rtsp-simple-server / mediamtx < 1.0)  — flat XxxEnabled keys:
+      apiEnabled: yes
       rtmpAddress: :1935
 
 Version is detected by running `mediamtx --version` before the process is
@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import tempfile
+import urllib.request
 from typing import Optional, Tuple
 
 from config import Config
@@ -34,11 +35,13 @@ log = logging.getLogger("mediamtx")
 MEDIAMTX_BIN = os.environ.get("MEDIAMTX_BIN", "/usr/local/bin/mediamtx")
 
 
-# ── Version detection ──────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+#  Version detection
+# ---------------------------------------------------------------------------
 
 def _detect_version(bin_path: str) -> Tuple[int, int]:
-    """
-    Run ``mediamtx --version`` and return (major, minor).
+    """Run ``mediamtx --version`` and return (major, minor).
+
     Returns (1, 0) when detection fails (assumes latest format).
     """
     try:
@@ -54,7 +57,9 @@ def _detect_version(bin_path: str) -> Tuple[int, int]:
             major, minor = int(m.group(1)), int(m.group(2))
             log.info("mediamtx version: v%d.%d", major, minor)
             return major, minor
-        log.warning("cannot parse mediamtx version from output: %r", text[:200])
+        log.warning(
+            "cannot parse mediamtx version from output: %r", text[:200]
+        )
     except FileNotFoundError:
         log.error("mediamtx binary not found at %s", bin_path)
     except Exception as e:
@@ -63,24 +68,22 @@ def _detect_version(bin_path: str) -> Tuple[int, int]:
     return 1, 0
 
 
-# ── Config generators ──────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+#  Config generators
+# ---------------------------------------------------------------------------
 
 def _gen_config_v1(cfg: Config) -> str:
-    """mediamtx v1.x — flat top-level keys (no nested protocol objects).
+    """mediamtx v1.x — flat top-level keys (YAML 1.2 compliant).
 
-    RTMP and RTSP are on by default; configure only address.
-    SRT requires an explicit bool enable flag.
-    HLS and WebRTC are disabled by bool.
-    rtspTransports: [tcp] restricts RTSP transport to TCP for localhost
-    reliability (replaces the deprecated ``protocols`` key in v1.16+).
-    ``paths: all_others:`` enables dynamic path creation so the compositor
-    and external publishers can register arbitrary paths on the fly.
+    Uses true/false instead of yes/no for YAML 1.2 compatibility
+    (mediamtx >= v1.15 uses goccy/go-yaml which is YAML 1.2 strict).
     """
+    hls_enabled = "true" if cfg.ingest.hls else "false"
     return (
         "logLevel: warn\n"
         "logDestinations: [stdout]\n"
         "\n"
-        "api: yes\n"
+        "api: true\n"
         f"apiAddress: 127.0.0.1:{cfg.mediamtx_api_port}\n"
         "\n"
         f"rtmpAddress: :{cfg.internal_rtmp_port}\n"
@@ -88,11 +91,13 @@ def _gen_config_v1(cfg: Config) -> str:
         f"rtspAddress: :{cfg.internal_rtsp_port}\n"
         "rtspTransports: [tcp]\n"
         "\n"
-        "srt: yes\n"
+        "srt: true\n"
         f"srtAddress: :{cfg.ingest.srt_port}\n"
         "\n"
-        "hls: no\n"
-        "webrtc: no\n"
+        f"hls: {hls_enabled}\n"
+        f"hlsAddress: :{cfg.ingest.hls_port}\n"
+        "\n"
+        "webrtc: false\n"
         "\n"
         "pathDefaults:\n"
         "paths:\n"
@@ -102,6 +107,7 @@ def _gen_config_v1(cfg: Config) -> str:
 
 def _gen_config_v0(cfg: Config) -> str:
     """rtsp-simple-server / mediamtx v0.x — flat XxxEnabled keys."""
+    hls_enabled = "yes" if cfg.ingest.hls else "no"
     return (
         "logLevel: warn\n"
         "logDestinations: [stdout]\n"
@@ -119,17 +125,20 @@ def _gen_config_v0(cfg: Config) -> str:
         "srtEnabled: yes\n"
         f"srtAddress: :{cfg.ingest.srt_port}\n"
         "\n"
-        "hlsEnabled: no\n"
+        f"hlsEnabled: {hls_enabled}\n"
         "webRTCEnabled: no\n"
     )
 
 
 def generate_mediamtx_config(cfg: Config, bin_path: str = MEDIAMTX_BIN) -> str:
+    """Generate a version-appropriate mediamtx config string."""
     major, _ = _detect_version(bin_path)
     return _gen_config_v1(cfg) if major >= 1 else _gen_config_v0(cfg)
 
 
-# ── Process manager ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+#  Process manager
+# ---------------------------------------------------------------------------
 
 class MediamtxManager:
     def __init__(self, cfg: Config):
@@ -138,6 +147,7 @@ class MediamtxManager:
         self._config_file: Optional[str] = None
 
     async def start(self) -> None:
+        """Generate config, write to temp file, and start mediamtx."""
         config_content = generate_mediamtx_config(self.cfg, MEDIAMTX_BIN)
 
         fd, path = tempfile.mkstemp(suffix=".yml", prefix="mediamtx-")
@@ -156,12 +166,10 @@ class MediamtxManager:
         log.info("mediamtx started (pid=%d)", self._proc.pid)
 
     async def wait_ready(self, timeout: float = 15.0) -> bool:
-        """Poll mediamtx API until it responds or the process dies or timeout."""
-        import urllib.request
+        """Poll mediamtx API until it responds or the process dies."""
         url = f"http://127.0.0.1:{self.cfg.mediamtx_api_port}/v3/paths/list"
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
-            # Bail early if the process already died
             if self._proc and self._proc.returncode is not None:
                 log.error(
                     "mediamtx exited with code %d before becoming ready",
@@ -180,6 +188,7 @@ class MediamtxManager:
         return False
 
     async def stop(self) -> None:
+        """Terminate mediamtx and clean up the temp config file."""
         if self._proc and self._proc.returncode is None:
             self._proc.terminate()
             try:
@@ -190,6 +199,7 @@ class MediamtxManager:
             os.unlink(self._config_file)
 
     async def _log_output(self) -> None:
+        """Read and log mediamtx stdout/stderr lines."""
         if not self._proc or not self._proc.stdout:
             return
         while True:
@@ -197,6 +207,5 @@ class MediamtxManager:
             if not line:
                 break
             decoded = line.decode(errors="replace").rstrip()
-            # Surface config errors at WARNING so they're visible without DEBUG
             level = logging.WARNING if "ERR" in decoded else logging.DEBUG
             log.log(level, "[mediamtx] %s", decoded)

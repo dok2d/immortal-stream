@@ -1,17 +1,21 @@
-"""Telegram notification sender."""
+"""Telegram notification sender with async queue."""
 import asyncio
-import logging
-import time
-from typing import Optional
-from urllib.request import urlopen, Request
-from urllib.parse import urlencode
-from urllib.error import URLError
 import json
+import logging
+from typing import Optional
+from urllib.error import URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen, Request
 
 log = logging.getLogger("telegram")
 
+MAX_RETRIES = 3
+HTTP_TIMEOUT = 10
+
 
 class TelegramNotifier:
+    """Queued, async-safe Telegram notification sender."""
+
     def __init__(self, token: str, chat_id: str):
         self.token = token
         self.chat_id = chat_id
@@ -31,43 +35,46 @@ class TelegramNotifier:
                 pass
 
     def send(self, text: str) -> None:
-        """Non-blocking enqueue."""
+        """Non-blocking enqueue of a notification message."""
         try:
             self._queue.put_nowait(text)
         except asyncio.QueueFull:
             log.warning("Telegram queue full, dropping message")
 
     async def _worker(self) -> None:
+        """Process queued messages with retry and exponential backoff."""
         while True:
             text = await self._queue.get()
-            for attempt in range(3):
+            for attempt in range(MAX_RETRIES):
                 try:
                     await asyncio.get_event_loop().run_in_executor(
                         None, self._post, text
                     )
                     break
                 except Exception as e:
-                    if attempt < 2:
+                    if attempt < MAX_RETRIES - 1:
                         await asyncio.sleep(2 ** attempt)
                     else:
                         log.error("Telegram send failed after retries: %s", e)
             self._queue.task_done()
 
     def _post(self, text: str) -> None:
+        """Synchronous HTTP POST to Telegram sendMessage API."""
         url = f"{self._base}/sendMessage"
         data = urlencode(
             {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
         ).encode()
         req = Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
-        with urlopen(req, timeout=10) as resp:
+        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             result = json.loads(resp.read())
             if not result.get("ok"):
                 raise RuntimeError(f"Telegram API error: {result}")
 
 
 class NoopNotifier:
-    """Used when Telegram is disabled."""
+    """Stub notifier used when Telegram is disabled."""
+
     def start(self) -> None:
         pass
 
