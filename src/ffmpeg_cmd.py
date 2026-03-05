@@ -94,6 +94,20 @@ def _anullsrc(sample_rate: int) -> List[str]:
     return ["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=stereo"]
 
 
+def _escape_tee_url(url: str) -> str:
+    r"""Escape special characters in a URL for FFmpeg tee muxer.
+
+    The tee muxer uses \, [, ], and | as metacharacters.
+    These must be backslash-escaped when they appear in target URLs.
+    """
+    return (
+        url
+        .replace("\\", "\\\\")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
+
+
 # ---------------------------------------------------------------------------
 #  Compositor: IDLE state
 # ---------------------------------------------------------------------------
@@ -283,6 +297,8 @@ def build_output(cfg: Config) -> List[str]:
 
     cmd = _ffmpeg_base() + [
         "-rtsp_transport", "tcp",
+        "-analyzeduration", "5000000",
+        "-probesize", "5000000",
         "-use_wallclock_as_timestamps", "1",
         "-i", relay_url,
     ]
@@ -290,7 +306,9 @@ def build_output(cfg: Config) -> List[str]:
     if len(targets) == 1:
         cmd += ["-c", "copy", "-f", "flv", targets[0]]
     else:
-        tee_str = "|".join(f"[f=flv]{t}" for t in targets)
+        tee_str = "|".join(
+            f"[f=flv:onfail=ignore]{_escape_tee_url(t)}" for t in targets
+        )
         cmd += ["-c", "copy", "-f", "tee", tee_str]
 
     return cmd

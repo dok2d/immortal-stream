@@ -404,6 +404,9 @@ class StreamManager:
     async def reload_output(self) -> None:
         """Restart output FFmpeg (targets changed). Briefly interrupts connection."""
         await self._terminate_process(self._output)
+        # Brief delay for mediamtx to stabilize the RTSP path after the
+        # old reader disconnects, preventing "no streams" errors.
+        await asyncio.sleep(1)
         await self._start_output()
 
     # ------------------------------------------------------------------ #
