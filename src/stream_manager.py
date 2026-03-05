@@ -36,6 +36,8 @@ log = logging.getLogger("stream_manager")
 PROBE_TIMEOUT = 8.0       # seconds to wait for ffprobe
 COMPOSITOR_GRACE = 2.0    # seconds for new compositor to connect before killing old
 POLL_INTERVAL = 1.0       # seconds between mediamtx API polls
+OUTPUT_RETRY_LIMIT = 3    # max retries for output FFmpeg quick failures
+OUTPUT_QUICK_FAIL = 5.0   # seconds — if output exits faster than this, it's a quick fail
 
 
 @dataclass
@@ -471,19 +473,6 @@ class StreamManager:
             f"rtsp://127.0.0.1:{self.cfg.internal_rtsp_port}"
             f"/{self.cfg.composite_path}"
         )
-        for attempt in range(1, 6):
-            if self._compositor and self._compositor.returncode is not None:
-                log.warning("Compositor dead during output startup — aborting")
-                return
-            info = await self._probe(relay_url)
-            if info and info.get("has_video"):
-                break
-            log.info("Waiting for compositor RTSP source (%d/5)...", attempt)
-            await asyncio.sleep(2)
-        else:
-            log.warning(
-                "Compositor RTSP source still not ready — starting output anyway"
-            )
 
         try:
             cmd = build_output(self.cfg)
@@ -492,14 +481,66 @@ class StreamManager:
             self.notifier.send(f"\u26a0\ufe0f Output FFmpeg build error: {e}")
             return
 
-        log.info("Output FFmpeg cmd: %s", " ".join(cmd))
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        self._output = proc
-        asyncio.create_task(_log_stderr(proc, "output", level=logging.WARNING))
+        for retry in range(OUTPUT_RETRY_LIMIT):
+            # Wait for compositor RTSP source to be ready
+            for attempt in range(1, 6):
+                if self._compositor and self._compositor.returncode is not None:
+                    log.warning(
+                        "Compositor dead during output startup — aborting"
+                    )
+                    return
+                info = await self._probe(relay_url)
+                if info and info.get("has_video"):
+                    break
+                log.info(
+                    "Waiting for compositor RTSP source (%d/5)...", attempt
+                )
+                await asyncio.sleep(2)
+            else:
+                log.warning(
+                    "Compositor RTSP source still not ready "
+                    "— starting output anyway"
+                )
+
+            log.info("Output FFmpeg cmd: %s", " ".join(cmd))
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self._output = proc
+            asyncio.create_task(
+                _log_stderr(proc, "output", level=logging.WARNING)
+            )
+
+            # Check for quick failure (exits within OUTPUT_QUICK_FAIL seconds)
+            try:
+                await asyncio.wait_for(
+                    proc.wait(), timeout=OUTPUT_QUICK_FAIL
+                )
+            except asyncio.TimeoutError:
+                # Still running after the grace period — success
+                return
+
+            # Process exited too quickly — retry with backoff
+            rc = proc.returncode
+            if retry < OUTPUT_RETRY_LIMIT - 1:
+                delay = 2 ** (retry + 1)
+                log.warning(
+                    "Output FFmpeg exited immediately (code %d), "
+                    "retrying in %ds (%d/%d)",
+                    rc, delay, retry + 1, OUTPUT_RETRY_LIMIT,
+                )
+                await asyncio.sleep(delay)
+            else:
+                log.error(
+                    "Output FFmpeg keeps failing (code %d) after %d retries",
+                    rc, OUTPUT_RETRY_LIMIT,
+                )
+                self.notifier.send(
+                    f"\u26a0\ufe0f <b>Output FFmpeg failed</b> (exit {rc}) "
+                    f"after {OUTPUT_RETRY_LIMIT} retries"
+                )
 
     # ------------------------------------------------------------------ #
     #  Watchdog                                                            #

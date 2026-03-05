@@ -303,12 +303,17 @@ def build_output(cfg: Config) -> List[str]:
         "-i", relay_url,
     ]
 
+    # Explicit -map 0 ensures all streams from the RTSP source are
+    # forwarded.  Without it the tee muxer may report "Output file does
+    # not contain any stream" when auto-selection fails.
+    cmd += ["-map", "0", "-c", "copy"]
+
     if len(targets) == 1:
-        cmd += ["-c", "copy", "-f", "flv", targets[0]]
+        cmd += ["-f", "flv", targets[0]]
     else:
         tee_str = "|".join(
             f"[f=flv:onfail=ignore]{_escape_tee_url(t)}" for t in targets
         )
-        cmd += ["-c", "copy", "-f", "tee", tee_str]
+        cmd += ["-f", "tee", tee_str]
 
     return cmd
