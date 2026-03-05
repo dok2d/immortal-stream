@@ -5,15 +5,13 @@ Stream detection: polls the mediamtx HTTP API every second.
 This avoids runOnPublish/runOnUnpublish hook compatibility issues.
 
 Architecture:
-  External stream → mediamtx (/live/KEY or /live)
-                         ↓ API poll (every 1 s)
+  External stream -> mediamtx (/live/KEY or /live)
+                         | API poll (every 1 s)
                     StreamManager
-                         ↓ manages
-                    Compositor FFmpeg → mediamtx /composite
-                                              ↓ internal relay
-                                        mediamtx /relay
-                                              ↓ (never restarts)
-                                        Output FFmpeg → target services
+                         | manages
+                    Compositor FFmpeg -> mediamtx /composite
+                                              | internal relay
+                                        Output FFmpeg -> target services
 
 Redundancy:
   Multiple input sources can be configured with priority ordering.
@@ -66,9 +64,9 @@ class StreamManager:
         self._lock = asyncio.Lock()
         self._running = False
         # Paths currently known to have an active publisher (from API poll)
-        self._known_active: Dict[str, str] = {}  # path → conn_id
+        self._known_active: Dict[str, str] = {}   # path -> conn_id
         # All fully-probed active streams, including standby sources
-        self._active_streams: Dict[str, StreamInfo] = {}  # path → StreamInfo
+        self._active_streams: Dict[str, StreamInfo] = {}  # path -> StreamInfo
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -76,11 +74,6 @@ class StreamManager:
 
     async def start(self) -> None:
         self._running = True
-        # Compositor MUST start first so it registers the composite path in
-        # mediamtx before the output FFmpeg tries to read from it.
-        # _start_compositor_idle internally waits COMPOSITOR_GRACE seconds,
-        # which is enough for FFmpeg to connect to mediamtx and push the
-        # first frame (path becomes ready).
         log.info("Starting compositor in IDLE mode")
         await self._start_compositor_idle()
         log.info("Starting output FFmpeg (persistent)")
@@ -103,15 +96,10 @@ class StreamManager:
     # ------------------------------------------------------------------ #
 
     async def _poll_loop(self) -> None:
-        """
-        Poll the mediamtx paths API every POLL_INTERVAL seconds.
+        """Poll the mediamtx paths API every POLL_INTERVAL seconds.
 
         Tries /v3/paths/list first (mediamtx v1.x); falls back to
         /v1/paths/list (rtsp-simple-server / mediamtx v0.x) on 404.
-
-        Response formats handled:
-          v1.x  items = list  [{"name":…, "ready": true, "source":{…}}]
-          v0.x  items = dict  {"path_name": {"sourceReady": true, …}}
         """
         base = f"http://127.0.0.1:{self.cfg.mediamtx_api_port}"
         api_url = f"{base}/v3/paths/list"
@@ -135,66 +123,75 @@ class StreamManager:
                 log.debug("mediamtx API poll error: %s", e)
                 continue
 
-            # Normalise both list (v1) and dict (v0) item formats
-            active_now: Dict[str, dict] = {}
-            raw_items = data.get("items", [])
+            active_now = self._normalize_api_response(data)
+            self._process_stream_changes(active_now)
 
-            if isinstance(raw_items, dict):
-                # v0.x: {"path_name": {"sourceReady": true, "source": {…}}}
-                for name, item in raw_items.items():
-                    if not self._is_ingest_path(name):
-                        continue
-                    if item.get("sourceReady") or (item.get("ready") and item.get("source")):
-                        src = item.get("source") or {}
-                        active_now[name] = {
-                            "conn_type": src.get("type", "unknown"),
-                            "conn_id": src.get("id", ""),
-                            "remote_addr": _extract_remote_addr(src),
-                        }
-            else:
-                # v1.x: [{"name": "…", "ready": true, "source": {…}}]
-                for item in raw_items:
-                    name: str = item.get("name", "")
-                    if not self._is_ingest_path(name):
-                        continue
-                    if item.get("ready") and item.get("source"):
-                        src = item["source"]
-                        active_now[name] = {
-                            "conn_type": src.get("type", "unknown"),
-                            "conn_id": src.get("id", ""),
-                            "remote_addr": _extract_remote_addr(src),
-                        }
+    def _normalize_api_response(self, data: dict) -> Dict[str, dict]:
+        """Normalise both v0 (dict) and v1 (list) mediamtx API formats
+        into a unified {path: {conn_type, conn_id, remote_addr}} dict."""
+        result: Dict[str, dict] = {}
+        raw_items = data.get("items", [])
 
-            # Detect new streams
-            for path, info in active_now.items():
-                if path not in self._known_active:
-                    self._known_active[path] = info["conn_id"]
-                    asyncio.create_task(
-                        self.on_stream_start(
-                            path, info["conn_type"], info["conn_id"],
-                            info["remote_addr"],
-                        )
+        if isinstance(raw_items, dict):
+            # v0.x: {"path_name": {"sourceReady": true, "source": {...}}}
+            for path_name, item in raw_items.items():
+                if not self._is_ingest_path(path_name):
+                    continue
+                is_ready = item.get("sourceReady") or (
+                    item.get("ready") and item.get("source")
+                )
+                if is_ready:
+                    src = item.get("source") or {}
+                    result[path_name] = {
+                        "conn_type": src.get("type", "unknown"),
+                        "conn_id": src.get("id", ""),
+                        "remote_addr": _extract_remote_addr(src),
+                    }
+        else:
+            # v1.x: [{"name": "...", "ready": true, "source": {...}}]
+            for item in raw_items:
+                path_name = item.get("name", "")
+                if not self._is_ingest_path(path_name):
+                    continue
+                if item.get("ready") and item.get("source"):
+                    src = item["source"]
+                    result[path_name] = {
+                        "conn_type": src.get("type", "unknown"),
+                        "conn_id": src.get("id", ""),
+                        "remote_addr": _extract_remote_addr(src),
+                    }
+
+        return result
+
+    def _process_stream_changes(self, active_now: Dict[str, dict]) -> None:
+        """Detect new and stopped streams, dispatch handlers."""
+        # New streams
+        for path, info in active_now.items():
+            if path not in self._known_active:
+                self._known_active[path] = info["conn_id"]
+                asyncio.create_task(
+                    self.on_stream_start(
+                        path, info["conn_type"], info["conn_id"],
+                        info["remote_addr"],
                     )
+                )
 
-            # Detect stopped streams
-            for path in list(self._known_active):
-                if path not in active_now:
-                    conn_id = self._known_active.pop(path)
-                    asyncio.create_task(self.on_stream_stop(path, conn_id))
+        # Stopped streams
+        for path in list(self._known_active):
+            if path not in active_now:
+                conn_id = self._known_active.pop(path)
+                asyncio.create_task(self.on_stream_stop(path, conn_id))
 
     def _is_ingest_path(self, name: str) -> bool:
         """True for paths that correspond to external ingest streams."""
-        # Always ignore the internal compositor path
         if name == self.cfg.composite_path or name.startswith("_c"):
             return False
 
         sources = self.cfg.ingest.redundant_sources
         if sources:
-            # In redundancy mode, only track explicitly configured source paths
             allowed = {f"live/{s}" if s else "live" for s in sources}
             return name in allowed
 
-        # Stream key filtering: only accept streams with the correct key
         if self.cfg.ingest.stream_key_required and self.cfg.ingest.allowed_key:
             return name == f"live/{self.cfg.ingest.allowed_key}"
 
@@ -205,12 +202,11 @@ class StreamManager:
     # ------------------------------------------------------------------ #
 
     def _select_best_stream(self) -> Optional[str]:
-        """
-        Return the path of the highest-priority active stream.
+        """Return the path of the highest-priority active stream.
 
-        When redundant_sources is configured, priority follows the list order
-        (index 0 = highest priority).  When not configured, any active stream
-        is returned (first-come first-served legacy behaviour).
+        When redundant_sources is configured, priority follows the list
+        order (index 0 = highest).  Otherwise, any active stream is
+        returned (first-come first-served legacy behaviour).
         """
         sources = self.cfg.ingest.redundant_sources
         if not sources:
@@ -223,7 +219,7 @@ class StreamManager:
         return None
 
     def _priority_label(self, path: str) -> str:
-        """Human-readable priority rank for a path, e.g. '#1 (primary)'."""
+        """Human-readable priority rank, e.g. '[#1 primary]'."""
         sources = self.cfg.ingest.redundant_sources
         if not sources:
             return ""
@@ -270,32 +266,10 @@ class StreamManager:
 
             self._active_streams[path] = info
 
-            # Is this stream the highest-priority active source?
             best_path = self._select_best_stream()
             if best_path != path:
-                # A higher-priority stream is already compositing; park this
-                # one as a standby — it will be promoted automatically if the
-                # current stream drops.
-                current_label = (
-                    f"{self._current_stream.path} "
-                    f"{self._priority_label(self._current_stream.path)}"
-                    if self._current_stream else "placeholder"
-                )
-                log.info(
-                    "Stream %s registered as standby (current compositor: %s)",
-                    path, current_label,
-                )
-                self.notifier.send(
-                    "📡 <b>Standby stream connected</b>\n"
-                    f"Source: <code>{path}</code> "
-                    f"{self._priority_label(path)}\n"
-                    f"Remote: <code>{remote_addr}</code>\n"
-                    f"Protocol: {conn_type}\n"
-                    f"Video: {info.codec_video} "
-                    f"{info.width}×{info.height} @{info.fps}fps\n"
-                    f"Audio: {info.codec_audio if info.has_audio else 'none'}\n"
-                    f"Active: {current_label}"
-                )
+                # Higher-priority stream is already compositing; standby
+                self._notify_standby_connected(info)
                 return
 
             # This is the best available stream — switch compositor to it
@@ -304,45 +278,18 @@ class StreamManager:
             await self._start_compositor_live(info)
 
             if old_stream:
-                # Higher-priority source arrived — preempt the current one
-                log.info(
-                    "Higher-priority stream %s preempts %s",
-                    path, old_stream.path,
-                )
-                self.notifier.send(
-                    "🔄 <b>Stream switched (higher priority arrived)</b>\n"
-                    f"From: <code>{old_stream.path}</code> "
-                    f"{self._priority_label(old_stream.path)}\n"
-                    f"To: <code>{path}</code> "
-                    f"{self._priority_label(path)}\n"
-                    f"Remote: <code>{remote_addr}</code>\n"
-                    f"Protocol: {conn_type}\n"
-                    f"Video: {info.codec_video} "
-                    f"{info.width}×{info.height} @{info.fps}fps\n"
-                    f"Audio: {info.codec_audio if info.has_audio else 'none'}"
-                )
+                self._notify_preemption(old_stream, info, remote_addr, conn_type)
             else:
-                self.notifier.send(
-                    "🟢 <b>Stream started</b>\n"
-                    f"Path: <code>{path}</code> "
-                    f"{self._priority_label(path)}\n"
-                    f"Remote: <code>{remote_addr}</code>\n"
-                    f"Protocol: {conn_type}\n"
-                    f"ID: <code>{conn_id}</code>\n"
-                    f"Video: {info.codec_video} "
-                    f"{info.width}×{info.height} @{info.fps}fps\n"
-                    f"Audio: {info.codec_audio if info.has_audio else 'none'}"
-                )
+                self._notify_stream_started(info, conn_id)
 
     async def on_stream_stop(self, path: str, conn_id: str) -> None:
         async with self._lock:
             self._active_streams.pop(path, None)
 
             if not self._current_stream or self._current_stream.path != path:
-                # A standby source dropped — no compositor change needed
                 log.info("Standby stream dropped: path=%s", path)
                 self.notifier.send(
-                    "📡 <b>Standby stream disconnected</b>\n"
+                    "\U0001f4e1 <b>Standby stream disconnected</b>\n"
                     f"Source: <code>{path}</code> "
                     f"{self._priority_label(path)}"
                 )
@@ -350,9 +297,7 @@ class StreamManager:
 
             info = self._current_stream
             duration = int(time.monotonic() - info.started_at)
-            log.info(
-                "Stream stopped: path=%s duration=%ds", path, duration
-            )
+            log.info("Stream stopped: path=%s duration=%ds", path, duration)
 
             # Try to fail over to the next best available stream
             next_path = self._select_best_stream()
@@ -361,34 +306,95 @@ class StreamManager:
                 self._current_stream = next_info
                 await self._start_compositor_live(next_info)
                 log.info(
-                    "Failover: %s → %s (was active %ds)", path, next_path, duration
+                    "Failover: %s -> %s (was active %ds)",
+                    path, next_path, duration,
                 )
                 self.notifier.send(
-                    "🔄 <b>Failover</b>\n"
+                    "\U0001f504 <b>Failover</b>\n"
                     f"Lost: <code>{path}</code> "
                     f"{self._priority_label(path)} "
                     f"(after {_fmt_duration(duration)})\n"
                     f"Now using: <code>{next_path}</code> "
                     f"{self._priority_label(next_path)}\n"
                     f"Video: {next_info.codec_video} "
-                    f"{next_info.width}×{next_info.height} @{next_info.fps}fps"
+                    f"{next_info.width}\u00d7{next_info.height} "
+                    f"@{next_info.fps}fps"
                 )
             else:
                 self._current_stream = None
                 await self._start_compositor_idle()
                 self.notifier.send(
-                    "🔴 <b>Stream stopped</b>\n"
+                    "\U0001f534 <b>Stream stopped</b>\n"
                     f"Path: <code>{path}</code>\n"
                     f"Duration: {_fmt_duration(duration)}\n"
                     "Switched to placeholder"
                 )
 
     # ------------------------------------------------------------------ #
+    #  Notification helpers                                                #
+    # ------------------------------------------------------------------ #
+
+    def _notify_standby_connected(self, info: StreamInfo) -> None:
+        current_label = (
+            f"{self._current_stream.path} "
+            f"{self._priority_label(self._current_stream.path)}"
+            if self._current_stream else "placeholder"
+        )
+        log.info(
+            "Stream %s registered as standby (current compositor: %s)",
+            info.path, current_label,
+        )
+        self.notifier.send(
+            "\U0001f4e1 <b>Standby stream connected</b>\n"
+            f"Source: <code>{info.path}</code> "
+            f"{self._priority_label(info.path)}\n"
+            f"Remote: <code>{info.remote_addr}</code>\n"
+            f"Protocol: {info.conn_type}\n"
+            f"Video: {info.codec_video} "
+            f"{info.width}\u00d7{info.height} @{info.fps}fps\n"
+            f"Audio: {info.codec_audio if info.has_audio else 'none'}\n"
+            f"Active: {current_label}"
+        )
+
+    def _notify_preemption(
+        self, old: StreamInfo, new: StreamInfo,
+        remote_addr: str, conn_type: str,
+    ) -> None:
+        log.info(
+            "Higher-priority stream %s preempts %s", new.path, old.path,
+        )
+        self.notifier.send(
+            "\U0001f504 <b>Stream switched (higher priority arrived)</b>\n"
+            f"From: <code>{old.path}</code> "
+            f"{self._priority_label(old.path)}\n"
+            f"To: <code>{new.path}</code> "
+            f"{self._priority_label(new.path)}\n"
+            f"Remote: <code>{remote_addr}</code>\n"
+            f"Protocol: {conn_type}\n"
+            f"Video: {new.codec_video} "
+            f"{new.width}\u00d7{new.height} @{new.fps}fps\n"
+            f"Audio: {new.codec_audio if new.has_audio else 'none'}"
+        )
+
+    def _notify_stream_started(self, info: StreamInfo, conn_id: str) -> None:
+        self.notifier.send(
+            "\U0001f7e2 <b>Stream started</b>\n"
+            f"Path: <code>{info.path}</code> "
+            f"{self._priority_label(info.path)}\n"
+            f"Remote: <code>{info.remote_addr}</code>\n"
+            f"Protocol: {info.conn_type}\n"
+            f"ID: <code>{conn_id}</code>\n"
+            f"Video: {info.codec_video} "
+            f"{info.width}\u00d7{info.height} @{info.fps}fps\n"
+            f"Audio: {info.codec_audio if info.has_audio else 'none'}"
+        )
+
+    # ------------------------------------------------------------------ #
     #  Public hot-reload API (called by Telegram bot)                      #
     # ------------------------------------------------------------------ #
 
     async def reload_compositor(self) -> None:
-        """Restart compositor with the current config (placeholder/overlay changed)."""
+        """Restart compositor with current config (placeholder/overlay changed)."""
         async with self._lock:
             if self._current_stream:
                 await self._start_compositor_live(self._current_stream)
@@ -397,12 +403,7 @@ class StreamManager:
 
     async def reload_output(self) -> None:
         """Restart output FFmpeg (targets changed). Briefly interrupts connection."""
-        if self._output and self._output.returncode is None:
-            self._output.terminate()
-            try:
-                await asyncio.wait_for(self._output.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                self._output.kill()
+        await self._terminate_process(self._output)
         await self._start_output()
 
     # ------------------------------------------------------------------ #
@@ -414,7 +415,7 @@ class StreamManager:
             cmd = build_compositor_idle(self.cfg)
         except Exception as e:
             log.error("Failed to build idle compositor command: %s", e)
-            self.notifier.send(f"⚠️ Compositor build error: {e}")
+            self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
             return
         await self._replace_compositor(cmd, "IDLE")
 
@@ -423,7 +424,7 @@ class StreamManager:
             cmd = build_compositor_live(self.cfg, info.path, info.has_audio)
         except Exception as e:
             log.error("Failed to build live compositor command: %s", e)
-            self.notifier.send(f"⚠️ Compositor build error: {e}")
+            self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
             return
         await self._replace_compositor(cmd, f"LIVE({info.path})")
 
@@ -432,17 +433,11 @@ class StreamManager:
 
         mediamtx does not handle two simultaneous RTMP publishers on the
         same path gracefully — the path resets during the switch, causing
-        Broken pipe errors on both the compositor and the output FFmpeg.
-        Stopping the old publisher first avoids this race; the brief gap
-        is acceptable because the watchdog restarts the output if needed.
+        Broken pipe errors.  Stopping the old publisher first avoids this
+        race; the brief gap is acceptable because the watchdog restarts
+        the output if needed.
         """
-        old = self._compositor
-        if old and old.returncode is None:
-            old.terminate()
-            try:
-                await asyncio.wait_for(old.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                old.kill()
+        await self._terminate_process(self._compositor)
 
         log.info("Starting compositor [%s]: %s", label, " ".join(cmd))
         new_proc = await asyncio.create_subprocess_exec(
@@ -450,13 +445,14 @@ class StreamManager:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        asyncio.create_task(self._log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING))
+        asyncio.create_task(
+            _log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING)
+        )
         self._compositor = new_proc
 
         # Wait for the new compositor to connect to mediamtx and push
         # first frames so the RTSP path is ready for the output FFmpeg.
         await asyncio.sleep(COMPOSITOR_GRACE)
-
         log.info("Compositor switched to [%s]", label)
 
     # ------------------------------------------------------------------ #
@@ -468,28 +464,31 @@ class StreamManager:
             log.info("No output targets configured — output FFmpeg not started")
             return
 
-        # Wait for compositor RTSP source to have streams before launching
-        relay_url = f"rtsp://127.0.0.1:{self.cfg.internal_rtsp_port}/{self.cfg.composite_path}"
+        relay_url = (
+            f"rtsp://127.0.0.1:{self.cfg.internal_rtsp_port}"
+            f"/{self.cfg.composite_path}"
+        )
         for attempt in range(1, 6):
-            # If compositor has died, no point probing — let the watchdog
-            # restart the compositor first, then we'll be restarted too.
             if self._compositor and self._compositor.returncode is not None:
                 log.warning("Compositor dead during output startup — aborting")
                 return
             info = await self._probe(relay_url)
             if info and info.get("has_video"):
                 break
-            log.info("Waiting for compositor RTSP source (%d/5)…", attempt)
+            log.info("Waiting for compositor RTSP source (%d/5)...", attempt)
             await asyncio.sleep(2)
         else:
-            log.warning("Compositor RTSP source still not ready — starting output anyway")
+            log.warning(
+                "Compositor RTSP source still not ready — starting output anyway"
+            )
 
         try:
             cmd = build_output(self.cfg)
         except Exception as e:
             log.error("Failed to build output command: %s", e)
-            self.notifier.send(f"⚠️ Output FFmpeg build error: {e}")
+            self.notifier.send(f"\u26a0\ufe0f Output FFmpeg build error: {e}")
             return
+
         log.info("Output FFmpeg cmd: %s", " ".join(cmd))
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -497,20 +496,17 @@ class StreamManager:
             stderr=asyncio.subprocess.PIPE,
         )
         self._output = proc
-        asyncio.create_task(self._log_stderr(proc, "output", level=logging.WARNING))
+        asyncio.create_task(_log_stderr(proc, "output", level=logging.WARNING))
 
     # ------------------------------------------------------------------ #
     #  Watchdog                                                            #
     # ------------------------------------------------------------------ #
 
     async def _watchdog(self) -> None:
+        """Monitor compositor and output health, restart on crash."""
         while self._running:
             await asyncio.sleep(5)
 
-            # Compositor FIRST: restarting it waits COMPOSITOR_GRACE so the
-            # path is registered in mediamtx before we (re)start the output.
-            # If both crashed simultaneously, this ordering ensures the output
-            # restart always finds a live path — no 400 Bad Request.
             compositor_crashed = (
                 self._compositor is not None
                 and self._compositor.returncode is not None
@@ -523,17 +519,9 @@ class StreamManager:
             if compositor_crashed:
                 rc = self._compositor.returncode
                 log.warning("Compositor exited (code %d) — restarting", rc)
-                # Kill the output too — its RTSP source is gone, so it will
-                # either produce errors or exit on its own.  Proactively
-                # restarting it avoids a broken intermediate state.
-                if self._output and self._output.returncode is None:
-                    log.info("Killing output FFmpeg (compositor died)")
-                    self._output.terminate()
-                    try:
-                        await asyncio.wait_for(self._output.wait(), timeout=5)
-                    except asyncio.TimeoutError:
-                        self._output.kill()
-                    output_crashed = True
+                # Kill the output too — its RTSP source is gone
+                await self._terminate_process(self._output)
+                output_crashed = True
                 if self._current_stream:
                     await self._start_compositor_live(self._current_stream)
                 else:
@@ -543,14 +531,27 @@ class StreamManager:
                 rc = self._output.returncode if self._output else -1
                 log.error("Output FFmpeg exited (code %d) — restarting", rc)
                 self.notifier.send(
-                    f"⚠️ <b>Output FFmpeg crashed</b> (exit {rc})\n"
-                    "Restarting…"
+                    f"\u26a0\ufe0f <b>Output FFmpeg crashed</b> (exit {rc})\n"
+                    "Restarting\u2026"
                 )
                 await self._start_output()
 
     # ------------------------------------------------------------------ #
     #  Helpers                                                             #
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    async def _terminate_process(
+        proc: Optional[asyncio.subprocess.Process],
+    ) -> None:
+        """Gracefully terminate a subprocess, falling back to kill."""
+        if not proc or proc.returncode is not None:
+            return
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
 
     async def _probe(self, url: str) -> Optional[dict]:
         """Run ffprobe on the URL, return a metadata dict or None."""
@@ -585,20 +586,14 @@ class StreamManager:
                 "fps": "unknown",
             }
             for s in data.get("streams", []):
-                if s.get("codec_type") == "video":
+                codec_type = s.get("codec_type")
+                if codec_type == "video":
                     result["has_video"] = True
                     result["codec_video"] = s.get("codec_name", "unknown")
                     result["width"] = s.get("width", 0)
                     result["height"] = s.get("height", 0)
-                    r = s.get("avg_frame_rate", "0/1")
-                    try:
-                        n, d = r.split("/")
-                        result["fps"] = (
-                            str(int(n) // int(d)) if int(d) else "unknown"
-                        )
-                    except Exception:
-                        result["fps"] = r
-                elif s.get("codec_type") == "audio":
+                    result["fps"] = _parse_fps(s.get("avg_frame_rate", "0/1"))
+                elif codec_type == "audio":
                     result["has_audio"] = True
                     result["codec_audio"] = s.get("codec_name", "unknown")
             return result
@@ -606,26 +601,33 @@ class StreamManager:
             log.warning("ffprobe error for %s: %s", url, e)
             return None
 
-    @staticmethod
-    async def _log_stderr(
-        proc: asyncio.subprocess.Process, label: str,
-        level: int = logging.DEBUG,
-    ) -> None:
-        if not proc.stderr:
-            return
-        while True:
-            line = await proc.stderr.readline()
-            if not line:
-                break
-            log.log(
-                level,
-                "[ffmpeg/%s] %s",
-                label,
-                line.decode(errors="replace").rstrip(),
-            )
+
+# ---------------------------------------------------------------------------
+#  Module-level helpers
+# ---------------------------------------------------------------------------
+
+async def _log_stderr(
+    proc: asyncio.subprocess.Process,
+    label: str,
+    level: int = logging.DEBUG,
+) -> None:
+    """Read and log stderr lines from an FFmpeg subprocess."""
+    if not proc.stderr:
+        return
+    while True:
+        line = await proc.stderr.readline()
+        if not line:
+            break
+        log.log(
+            level,
+            "[ffmpeg/%s] %s",
+            label,
+            line.decode(errors="replace").rstrip(),
+        )
 
 
 def _fmt_duration(secs: int) -> str:
+    """Format seconds as human-readable duration."""
     h, r = divmod(secs, 3600)
     m, s = divmod(r, 60)
     if h:
@@ -633,6 +635,15 @@ def _fmt_duration(secs: int) -> str:
     if m:
         return f"{m}m {s}s"
     return f"{s}s"
+
+
+def _parse_fps(rate: str) -> str:
+    """Parse an avg_frame_rate fraction like '30000/1001' into '29'."""
+    try:
+        n, d = rate.split("/")
+        return str(int(n) // int(d)) if int(d) else "unknown"
+    except Exception:
+        return rate
 
 
 def _extract_remote_addr(source: dict) -> str:
@@ -645,7 +656,6 @@ def _extract_remote_addr(source: dict) -> str:
     raw_id = source.get("id", "")
     if not raw_id:
         return "unknown"
-    # Try to extract the address part after the type prefix
     parts = raw_id.split()
     if len(parts) >= 2:
         return parts[-1]

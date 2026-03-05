@@ -2,3 +2,8 @@ config.yaml
 media/
 *.pyc
 __pycache__/
+*.egg-info/
+.env
+.venv/
+*.tmp
+*.log

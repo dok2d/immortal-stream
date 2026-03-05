@@ -27,17 +27,18 @@ log = logging.getLogger("main")
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/etc/immortal-stream/config.yaml")
 
 
+def _is_telegram_configured(cfg) -> bool:
+    return cfg.telegram.enabled and cfg.telegram.bot_token and cfg.telegram.chat_id
+
+
 async def main() -> None:
-    # ------------------------------------------------------------------ #
-    #  Load configuration                                                  #
-    # ------------------------------------------------------------------ #
+    # -- Load configuration ------------------------------------------------
     try:
         cfg = load_config(CONFIG_PATH)
     except Exception as e:
         log.critical("Failed to load config from %s: %s", CONFIG_PATH, e)
         sys.exit(1)
 
-    # Apply log level from config (or LOG_LEVEL env var fallback)
     level = getattr(logging, cfg.log_level, logging.INFO)
     logging.getLogger().setLevel(level)
 
@@ -49,10 +50,8 @@ async def main() -> None:
         cfg.placeholder.type,
     )
 
-    # ------------------------------------------------------------------ #
-    #  Telegram notifier                                                   #
-    # ------------------------------------------------------------------ #
-    if cfg.telegram.enabled and cfg.telegram.bot_token and cfg.telegram.chat_id:
+    # -- Telegram notifier -------------------------------------------------
+    if _is_telegram_configured(cfg):
         notifier = TelegramNotifier(cfg.telegram.bot_token, cfg.telegram.chat_id)
         log.info("Telegram notifications enabled (chat=%s)", cfg.telegram.chat_id)
     else:
@@ -61,35 +60,29 @@ async def main() -> None:
 
     notifier.start()
 
-    # ------------------------------------------------------------------ #
-    #  mediamtx                                                            #
-    # ------------------------------------------------------------------ #
+    # -- mediamtx ----------------------------------------------------------
     mediamtx = MediamtxManager(cfg)
     await mediamtx.start()
     ready = await mediamtx.wait_ready(timeout=15)
     if not ready:
         log.critical("mediamtx failed to start")
-        notifier.send("💀 <b>immortal-stream failed to start</b>: mediamtx not ready")
+        notifier.send(
+            "\U0001f480 <b>immortal-stream failed to start</b>: mediamtx not ready"
+        )
         sys.exit(1)
 
-    # ------------------------------------------------------------------ #
-    #  Stream manager (polls mediamtx API for stream events)              #
-    # ------------------------------------------------------------------ #
+    # -- Stream manager (polls mediamtx API for stream events) -------------
     manager = StreamManager(cfg, notifier)
     await manager.start()
 
-    # ------------------------------------------------------------------ #
-    #  Telegram bot (runtime config changes)                              #
-    # ------------------------------------------------------------------ #
-    bot: TelegramBot | None = None
-    if cfg.telegram.enabled and cfg.telegram.bot_token and cfg.telegram.chat_id:
+    # -- Telegram bot (runtime config changes) -----------------------------
+    bot = None
+    if _is_telegram_configured(cfg):
         bot = TelegramBot(cfg, manager)
         bot.start()
 
-    # ------------------------------------------------------------------ #
-    #  Startup notification                                                #
-    # ------------------------------------------------------------------ #
-    target_list = "\n".join(f"  • {t}" for t in cfg.output.targets) or "  (none)"
+    # -- Startup notification ----------------------------------------------
+    target_list = "\n".join(f"  \u2022 {t}" for t in cfg.output.targets) or "  (none)"
     hls_line = f"\nIngest HLS:  :{cfg.ingest.hls_port}" if cfg.ingest.hls else ""
     key_line = (
         f"\nStream key:  required ({cfg.ingest.allowed_key})"
@@ -97,7 +90,7 @@ async def main() -> None:
         else "\nStream key:  any"
     )
     notifier.send(
-        "✅ <b>immortal-stream started</b>\n"
+        "\u2705 <b>immortal-stream started</b>\n"
         f"Ingest RTMP: :{cfg.ingest.port}\n"
         f"Ingest SRT:  :{cfg.ingest.srt_port}"
         f"{hls_line}{key_line}\n"
@@ -106,9 +99,7 @@ async def main() -> None:
         f"Targets:\n{target_list}"
     )
 
-    # ------------------------------------------------------------------ #
-    #  Graceful shutdown                                                   #
-    # ------------------------------------------------------------------ #
+    # -- Graceful shutdown -------------------------------------------------
     loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()
 
@@ -122,7 +113,7 @@ async def main() -> None:
     await stop_event.wait()
 
     log.info("Shutting down...")
-    notifier.send("🔌 <b>immortal-stream stopping</b>")
+    notifier.send("\U0001f50c <b>immortal-stream stopping</b>")
     if bot:
         await bot.stop()
     await manager.stop()
