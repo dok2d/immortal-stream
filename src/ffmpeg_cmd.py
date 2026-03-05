@@ -271,6 +271,7 @@ def build_output(cfg: Config) -> List[str]:
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats",
         "-rtsp_transport", "tcp",
+        "-use_wallclock_as_timestamps", "1",
         "-i", relay_url,
     ]
 

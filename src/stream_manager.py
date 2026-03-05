@@ -429,13 +429,13 @@ class StreamManager:
 
     async def _replace_compositor(self, cmd: list, label: str) -> None:
         """Start new compositor, wait for it to stabilise, then kill the old one."""
-        log.debug("Starting compositor [%s]: %s", label, " ".join(cmd))
+        log.info("Starting compositor [%s]: %s", label, " ".join(cmd))
         new_proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        asyncio.create_task(self._log_stderr(new_proc, f"compositor[{label}]"))
+        asyncio.create_task(self._log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING))
 
         # Allow new compositor to connect and push first frames before
         # tearing down the old one (keeps the relay path continuously fed)
@@ -465,6 +465,11 @@ class StreamManager:
         # Wait for compositor RTSP source to have streams before launching
         relay_url = f"rtsp://127.0.0.1:{self.cfg.internal_rtsp_port}/{self.cfg.composite_path}"
         for attempt in range(1, 6):
+            # If compositor has died, no point probing — let the watchdog
+            # restart the compositor first, then we'll be restarted too.
+            if self._compositor and self._compositor.returncode is not None:
+                log.warning("Compositor dead during output startup — aborting")
+                return
             info = await self._probe(relay_url)
             if info and info.get("has_video"):
                 break
@@ -500,16 +505,36 @@ class StreamManager:
             # path is registered in mediamtx before we (re)start the output.
             # If both crashed simultaneously, this ordering ensures the output
             # restart always finds a live path — no 400 Bad Request.
-            if self._compositor and self._compositor.returncode is not None:
+            compositor_crashed = (
+                self._compositor is not None
+                and self._compositor.returncode is not None
+            )
+            output_crashed = (
+                self._output is not None
+                and self._output.returncode is not None
+            )
+
+            if compositor_crashed:
                 rc = self._compositor.returncode
                 log.warning("Compositor exited (code %d) — restarting", rc)
+                # Kill the output too — its RTSP source is gone, so it will
+                # either produce errors or exit on its own.  Proactively
+                # restarting it avoids a broken intermediate state.
+                if self._output and self._output.returncode is None:
+                    log.info("Killing output FFmpeg (compositor died)")
+                    self._output.terminate()
+                    try:
+                        await asyncio.wait_for(self._output.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        self._output.kill()
+                    output_crashed = True
                 if self._current_stream:
                     await self._start_compositor_live(self._current_stream)
                 else:
                     await self._start_compositor_idle()
 
-            if self._output and self._output.returncode is not None:
-                rc = self._output.returncode
+            if output_crashed:
+                rc = self._output.returncode if self._output else -1
                 log.error("Output FFmpeg exited (code %d) — restarting", rc)
                 self.notifier.send(
                     f"⚠️ <b>Output FFmpeg crashed</b> (exit {rc})\n"
