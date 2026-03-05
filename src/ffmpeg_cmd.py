@@ -26,6 +26,25 @@ def _scale_pad(v, src_label: str, dst_label: str) -> str:
     )
 
 
+def _escape_drawtext(text: str) -> str:
+    """Escape text for FFmpeg drawtext filter inside a filter_complex string.
+
+    Characters special to drawtext (\\, ', :) AND to the filter graph
+    parser (", ;, [, ]) are all backslash-escaped so no quoting wrapper
+    is needed around the value.
+    """
+    return (
+        text
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace('"', '\\"')
+        .replace(":", "\\:")
+        .replace(";", "\\;")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
+
+
 def _output_flags(cfg: Config, dest: str) -> List[str]:
     v = cfg.output.video
     a = cfg.output.audio
@@ -96,20 +115,14 @@ def build_compositor_idle(cfg: Config) -> List[str]:
             "-f", "lavfi", "-i",
             f"anullsrc=r={a.sample_rate}:cl=stereo",
         ]
-        escaped = (
-            ph.text
-            .replace("\\", "\\\\")
-            .replace("'", "\\'")
-            .replace('"', '\\"')
-            .replace(":", "\\:")
-        )
+        escaped = _escape_drawtext(ph.text)
         fp = f":fontfile='{ph.font_path}'" if ph.font_path else ""
         # Center text by default if x=0 and y=0
         x_expr = str(ph.x) if ph.x else "(w-text_w)/2"
         y_expr = str(ph.y) if ph.y else "(h-text_h)/2"
         filters.append(
             f"[0:v]drawtext{fp}"
-            f":text='{escaped}'"
+            f":text={escaped}"
             f":x={x_expr}:y={y_expr}"
             f":fontsize={ph.font_size}"
             f":fontcolor={ph.font_color}@{ph.opacity:.3f}"
@@ -205,17 +218,11 @@ def build_compositor_live(
             input_count += 1
 
         elif ov.type == "text" and ov.text:
-            escaped = (
-                ov.text
-                .replace("\\", "\\\\")
-                .replace("'", "\\'")
-                .replace('"', '\\"')
-                .replace(":", "\\:")
-            )
+            escaped = _escape_drawtext(ov.text)
             fp = f":fontfile='{ov.font_path}'" if ov.font_path else ""
             filters.append(
                 f"[{last_v}]drawtext{fp}"
-                f":text='{escaped}'"
+                f":text={escaped}"
                 f":x={ov.x}:y={ov.y}"
                 f":fontsize={ov.font_size}"
                 f":fontcolor={ov.font_color}@{ov.opacity:.3f}"
