@@ -240,7 +240,7 @@ class TelegramBot:
             return "✅ Placeholder → black screen"
 
         if sub == "text":
-            text = arg_str[len("text"):].strip()
+            text = arg_str[len("text"):].strip().strip("\"'")
             if not text:
                 return "Usage: /placeholder text <your text here>"
             self.cfg.placeholder.type = "text"
@@ -295,7 +295,7 @@ class TelegramBot:
             return "✅ Overlay disabled"
 
         if sub == "text":
-            text = arg_str[len("text"):].strip()
+            text = arg_str[len("text"):].strip().strip("\"'")
             if not text:
                 return "Usage: /overlay text <your text here>"
             self.cfg.overlay.enabled = True

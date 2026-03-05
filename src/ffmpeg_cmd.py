@@ -100,6 +100,7 @@ def build_compositor_idle(cfg: Config) -> List[str]:
             ph.text
             .replace("\\", "\\\\")
             .replace("'", "\\'")
+            .replace('"', '\\"')
             .replace(":", "\\:")
         )
         fp = f":fontfile='{ph.font_path}'" if ph.font_path else ""
@@ -208,6 +209,7 @@ def build_compositor_live(
                 ov.text
                 .replace("\\", "\\\\")
                 .replace("'", "\\'")
+                .replace('"', '\\"')
                 .replace(":", "\\:")
             )
             fp = f":fontfile='{ov.font_path}'" if ov.font_path else ""
