@@ -258,9 +258,9 @@ def build_output(cfg: Config) -> List[str]:
     old one is terminated, so the RTSP path always has data.  If the
     compositor crashes, the watchdog restarts both processes.
 
-    Note: -reconnect flags are HTTP(S)-only in FFmpeg and do not apply to
-    RTSP input.  The -stimeout flag controls how long FFmpeg waits on a
-    stalled RTSP connection before giving up (in microseconds).
+    Note: -reconnect and -stimeout flags are not universally supported
+    across FFmpeg builds (e.g. Alpine).  We rely on the watchdog to
+    restart this process if the RTSP connection drops.
     """
     relay_url = f"rtsp://127.0.0.1:{cfg.internal_rtsp_port}/{cfg.composite_path}"
     targets = cfg.output.targets
@@ -271,7 +271,6 @@ def build_output(cfg: Config) -> List[str]:
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats",
         "-rtsp_transport", "tcp",
-        "-stimeout", "5000000",
         "-i", relay_url,
     ]
 
