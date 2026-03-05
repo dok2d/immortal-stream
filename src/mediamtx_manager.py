@@ -71,7 +71,10 @@ def _gen_config_v1(cfg: Config) -> str:
     RTMP and RTSP are on by default; configure only address.
     SRT requires an explicit bool enable flag.
     HLS and WebRTC are disabled by bool.
-    protocols: [tcp] restricts RTSP transport to TCP for localhost reliability.
+    rtspTransports: [tcp] restricts RTSP transport to TCP for localhost
+    reliability (replaces the deprecated ``protocols`` key in v1.16+).
+    ``paths: all_others:`` enables dynamic path creation so the compositor
+    and external publishers can register arbitrary paths on the fly.
     """
     return (
         "logLevel: warn\n"
@@ -83,13 +86,17 @@ def _gen_config_v1(cfg: Config) -> str:
         f"rtmpAddress: :{cfg.internal_rtmp_port}\n"
         "\n"
         f"rtspAddress: :{cfg.internal_rtsp_port}\n"
-        "protocols: [tcp]\n"
+        "rtspTransports: [tcp]\n"
         "\n"
         "srt: yes\n"
         f"srtAddress: :{cfg.ingest.srt_port}\n"
         "\n"
         "hls: no\n"
         "webrtc: no\n"
+        "\n"
+        "pathDefaults:\n"
+        "paths:\n"
+        "  all_others:\n"
     )
 
 
