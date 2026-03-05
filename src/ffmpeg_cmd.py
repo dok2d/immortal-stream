@@ -116,17 +116,21 @@ def build_compositor_idle(cfg: Config) -> List[str]:
             f"anullsrc=r={a.sample_rate}:cl=stereo",
         ]
         escaped = _escape_drawtext(ph.text)
-        fp = f":fontfile='{ph.font_path}'" if ph.font_path else ""
+        opts = []
+        if ph.font_path:
+            opts.append(f"fontfile='{ph.font_path}'")
         # Center text by default if x=0 and y=0
         x_expr = str(ph.x) if ph.x else "(w-text_w)/2"
         y_expr = str(ph.y) if ph.y else "(h-text_h)/2"
+        opts += [
+            f"text={escaped}",
+            f"x={x_expr}",
+            f"y={y_expr}",
+            f"fontsize={ph.font_size}",
+            f"fontcolor={ph.font_color}@{ph.opacity:.3f}",
+        ]
         filters.append(
-            f"[0:v]drawtext{fp}"
-            f":text={escaped}"
-            f":x={x_expr}:y={y_expr}"
-            f":fontsize={ph.font_size}"
-            f":fontcolor={ph.font_color}@{ph.opacity:.3f}"
-            f"[vout]"
+            f"[0:v]drawtext={':'.join(opts)}[vout]"
         )
         audio_map = "1:a"
 
@@ -219,14 +223,18 @@ def build_compositor_live(
 
         elif ov.type == "text" and ov.text:
             escaped = _escape_drawtext(ov.text)
-            fp = f":fontfile='{ov.font_path}'" if ov.font_path else ""
+            ov_opts = []
+            if ov.font_path:
+                ov_opts.append(f"fontfile='{ov.font_path}'")
+            ov_opts += [
+                f"text={escaped}",
+                f"x={ov.x}",
+                f"y={ov.y}",
+                f"fontsize={ov.font_size}",
+                f"fontcolor={ov.font_color}@{ov.opacity:.3f}",
+            ]
             filters.append(
-                f"[{last_v}]drawtext{fp}"
-                f":text={escaped}"
-                f":x={ov.x}:y={ov.y}"
-                f":fontsize={ov.font_size}"
-                f":fontcolor={ov.font_color}@{ov.opacity:.3f}"
-                f"[vwith_text]"
+                f"[{last_v}]drawtext={':'.join(ov_opts)}[vwith_text]"
             )
             last_v = "vwith_text"
 
