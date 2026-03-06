@@ -74,6 +74,11 @@ class StreamManager:
     #  Lifecycle                                                           #
     # ------------------------------------------------------------------ #
 
+    @property
+    def is_paused(self) -> bool:
+        """True when all processes have been stopped via pause_all()."""
+        return not self._running
+
     async def start(self) -> None:
         self._running = True
         log.info("Starting compositor in IDLE mode")
@@ -92,6 +97,31 @@ class StreamManager:
                     await asyncio.wait_for(proc.wait(), timeout=5)
                 except asyncio.TimeoutError:
                     proc.kill()
+
+    async def pause_all(self) -> None:
+        """Stop compositor & output, pause polling and watchdog.
+
+        The service enters a fully stopped state.  Use resume_all() to
+        restart everything.
+        """
+        self._running = False
+        await self._terminate_process(self._output)
+        self._output = None
+        await self._terminate_process(self._compositor)
+        self._compositor = None
+        log.info("All processes paused")
+
+    async def resume_all(self) -> None:
+        """Restart compositor, output, polling and watchdog."""
+        self._running = True
+        if self._current_stream:
+            await self._start_compositor_live(self._current_stream)
+        else:
+            await self._start_compositor_idle()
+        await self._start_output()
+        asyncio.create_task(self._poll_loop())
+        asyncio.create_task(self._watchdog())
+        log.info("All processes resumed")
 
     # ------------------------------------------------------------------ #
     #  mediamtx API polling — stream detection                            #

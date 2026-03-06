@@ -149,8 +149,15 @@ output:
 #
 # Events: stream started/stopped, failover, process restarts, errors.
 #
-# Bot commands (send to the configured chat):
+# Bot features:
+#   - Inline keyboard buttons for all controls (menu-driven)
+#   - Text commands still supported for power users
+#
+# Commands:
+#   /menu                      — main menu with buttons
 #   /status                    — current state and settings
+#   /stop                      — pause all processes (compositor + output)
+#   /resume                    — restart all processes
 #   /placeholder black|text|image|video|opacity
 #   /overlay off|text|image|x|y|opacity|size|color
 #   /target list|add|remove|set
