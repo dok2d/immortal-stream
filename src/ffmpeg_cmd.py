@@ -1,12 +1,20 @@
 """FFmpeg command builders for each streaming state."""
 from typing import List
-from config import Config
 
+from config import Config, VideoConfig
+
+# Default font for drawtext when no font_path is configured.
+DEFAULT_FONT = "/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
+
+
+# ---------------------------------------------------------------------------
+#  Internal helpers
+# ---------------------------------------------------------------------------
 
 def _bufsize(bitrate: str) -> str:
-    """2× bitrate as bufsize string (e.g. '6000k' → '12000k')."""
+    """2x bitrate as bufsize string (e.g. '6000k' -> '12000k')."""
+    b = bitrate.lower()
     try:
-        b = bitrate.lower()
         if b.endswith("k"):
             return f"{int(b[:-1]) * 2}k"
         if b.endswith("m"):
@@ -16,8 +24,8 @@ def _bufsize(bitrate: str) -> str:
         return bitrate
 
 
-def _scale_pad(v, src_label: str, dst_label: str) -> str:
-    """FFmpeg filter chain: scale + pad + setsar → dst_label."""
+def _scale_pad(v: VideoConfig, src_label: str, dst_label: str) -> str:
+    """FFmpeg filter chain: scale + pad + setsar -> dst_label."""
     return (
         f"[{src_label}]scale={v.width}:{v.height}:"
         f"force_original_aspect_ratio=decrease,"
@@ -26,7 +34,27 @@ def _scale_pad(v, src_label: str, dst_label: str) -> str:
     )
 
 
-def _output_flags(cfg: Config, dest: str) -> List[str]:
+def _escape_drawtext(text: str) -> str:
+    r"""Escape text for FFmpeg drawtext filter inside a filter_complex string.
+
+    Characters special to drawtext (\\, ', :) AND to the filter graph
+    parser (", ;, [, ]) are all backslash-escaped so no quoting wrapper
+    is needed around the value.
+    """
+    return (
+        text
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace('"', '\\"')
+        .replace(":", "\\:")
+        .replace(";", "\\;")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
+
+
+def _encoding_flags(cfg: Config) -> List[str]:
+    """Common encoding flags for the compositor output (video + audio)."""
     v = cfg.output.video
     a = cfg.output.audio
     return [
@@ -44,54 +72,97 @@ def _output_flags(cfg: Config, dest: str) -> List[str]:
         "-b:a", a.bitrate,
         "-ar", str(a.sample_rate),
         "-ac", "2",
-        "-f", "flv",
-        dest,
     ]
 
 
 def _composite_dest(cfg: Config) -> str:
+    """RTMP URL the compositor pushes to (internal mediamtx path).
+
+    Uses a per-run secret path name instead of auth credentials,
+    avoiding mediamtx publishUser/publishPass field compatibility issues.
+    """
+    return f"rtmp://127.0.0.1:{cfg.internal_rtmp_port}/{cfg.composite_path}"
+
+
+def _ffmpeg_base() -> List[str]:
+    """Common FFmpeg prefix flags."""
+    return ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats"]
+
+
+def _anullsrc(sample_rate: int) -> List[str]:
+    """lavfi silence source input."""
+    return ["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=stereo"]
+
+
+def _escape_tee_url(url: str) -> str:
+    r"""Escape special characters in a URL for FFmpeg tee muxer.
+
+    The tee muxer uses \, [, ], and | as metacharacters.
+    These must be backslash-escaped when they appear in target URLs.
+    """
     return (
-        f"rtmp://internal:{cfg.internal_token}"
-        f"@127.0.0.1:{cfg.internal_rtmp_port}/composite"
+        url
+        .replace("\\", "\\\\")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
     )
 
 
+# ---------------------------------------------------------------------------
+#  Compositor: IDLE state
+# ---------------------------------------------------------------------------
+
 def build_compositor_idle(cfg: Config) -> List[str]:
-    """
-    Compositor command for IDLE state (no incoming stream).
-    Outputs placeholder (black / image / video) to the internal composite path.
+    """Compositor command for IDLE state (no incoming stream).
+
+    Outputs placeholder (black / image / video / text) to the internal
+    composite path.
     """
     v = cfg.output.video
     a = cfg.output.audio
     ph = cfg.placeholder
     dest = _composite_dest(cfg)
 
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats"]
+    cmd = _ffmpeg_base()
     filters: List[str] = []
-    audio_map: str
 
     if ph.type == "black":
         cmd += [
             "-f", "lavfi", "-i",
             f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
-            "-f", "lavfi", "-i",
-            f"anullsrc=r={a.sample_rate}:cl=stereo",
         ]
-        # No filter_complex needed for black — map directly
-        cmd += [
-            "-map", "0:v", "-map", "1:a",
-        ]
-        cmd += _output_flags(cfg, dest)
+        cmd += _anullsrc(a.sample_rate)
+        cmd += ["-map", "0:v", "-map", "1:a"]
+        cmd += _encoding_flags(cfg)
+        cmd += ["-f", "flv", dest]
         return cmd
 
-    elif ph.type == "image":
-        if not ph.path:
-            raise ValueError("placeholder.path is required for type=image")
+    if ph.type == "text":
         cmd += [
-            "-re", "-loop", "1", "-i", ph.path,
             "-f", "lavfi", "-i",
-            f"anullsrc=r={a.sample_rate}:cl=stereo",
+            f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
         ]
+        cmd += _anullsrc(a.sample_rate)
+
+        escaped = _escape_drawtext(ph.text)
+        font = ph.font_path or DEFAULT_FONT
+        x_expr = str(ph.x) if ph.x else "(w-text_w)/2"
+        y_expr = str(ph.y) if ph.y else "(h-text_h)/2"
+        opts = [
+            f"fontfile='{font}'",
+            f"text={escaped}",
+            f"x={x_expr}",
+            f"y={y_expr}",
+            f"fontsize={ph.font_size}",
+            f"fontcolor={ph.font_color}@{ph.opacity:.3f}",
+            "borderw=2",
+            "bordercolor=white",
+        ]
+        filters.append(f"[0:v]drawtext={':'.join(opts)}[vout]")
+
+    elif ph.type == "image":
+        cmd += ["-re", "-loop", "1", "-i", ph.path]
+        cmd += _anullsrc(a.sample_rate)
         filters.append(_scale_pad(v, "0:v", "vscaled"))
         if ph.opacity < 1.0:
             filters.append(
@@ -100,37 +171,33 @@ def build_compositor_idle(cfg: Config) -> List[str]:
             )
         else:
             filters.append("[vscaled]copy[vout]")
-        audio_map = "1:a"
 
     elif ph.type == "video":
-        if not ph.path:
-            raise ValueError("placeholder.path is required for type=video")
-        cmd += [
-            "-re", "-stream_loop", "-1", "-i", ph.path,
-            "-f", "lavfi", "-i",
-            f"anullsrc=r={a.sample_rate}:cl=stereo",
-        ]
+        cmd += ["-re", "-stream_loop", "-1", "-i", ph.path]
+        cmd += _anullsrc(a.sample_rate)
         filters.append(_scale_pad(v, "0:v", "vout"))
-        # Always use silence for placeholder video; avoids issues with
-        # videos that have no audio track
-        audio_map = "1:a"
 
     else:
         raise ValueError(f"Unknown placeholder.type: {ph.type!r}")
 
     cmd += ["-filter_complex", ";".join(filters)]
-    cmd += ["-map", "[vout]", "-map", audio_map]
-    cmd += _output_flags(cfg, dest)
+    cmd += ["-map", "[vout]", "-map", "1:a"]
+    cmd += _encoding_flags(cfg)
+    cmd += ["-f", "flv", dest]
     return cmd
 
+
+# ---------------------------------------------------------------------------
+#  Compositor: LIVE state
+# ---------------------------------------------------------------------------
 
 def build_compositor_live(
     cfg: Config,
     stream_path: str,
     has_audio: bool,
 ) -> List[str]:
-    """
-    Compositor command for LIVE state.
+    """Compositor command for LIVE state.
+
     Reads incoming stream from mediamtx (RTSP), applies optional overlay,
     and outputs to the internal composite path.
     """
@@ -141,106 +208,112 @@ def build_compositor_live(
 
     stream_url = f"rtsp://127.0.0.1:{cfg.internal_rtsp_port}/{stream_path}"
 
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats",
-        "-rtsp_transport", "tcp",
-        "-i", stream_url,
-    ]
+    cmd = _ffmpeg_base() + ["-rtsp_transport", "tcp", "-i", stream_url]
 
     filters: List[str] = []
-    # input_count tracks the next FFmpeg input index (0 = incoming stream)
-    input_count = 1
+    input_idx = 1
     last_v = "vscaled"
 
     # Scale/pad incoming to output resolution
     filters.append(_scale_pad(v, "0:v", "vscaled"))
 
-    # Supplementary overlay (only in LIVE mode)
+    # Overlay (only in LIVE mode)
     if ov.enabled:
         if ov.type == "image" and ov.path:
             cmd += ["-loop", "1", "-i", ov.path]
-            alpha_chain = ""
-            if ov.opacity < 1.0:
-                alpha_chain = f",colorchannelmixer=aa={ov.opacity:.3f}"
-            filters.append(
-                f"[{input_count}:v]format=rgba{alpha_chain}[ov_img]"
+            alpha = (
+                f",colorchannelmixer=aa={ov.opacity:.3f}"
+                if ov.opacity < 1.0 else ""
             )
+            filters.append(f"[{input_idx}:v]format=rgba{alpha}[ov_img]")
             filters.append(
                 f"[{last_v}][ov_img]overlay={ov.x}:{ov.y}[vwith_ov]"
             )
             last_v = "vwith_ov"
-            input_count += 1
+            input_idx += 1
 
         elif ov.type == "text" and ov.text:
-            escaped = (
-                ov.text
-                .replace("\\", "\\\\")
-                .replace("'", "\\'")
-                .replace(":", "\\:")
-            )
-            fp = f":fontfile='{ov.font_path}'" if ov.font_path else ""
+            escaped = _escape_drawtext(ov.text)
+            font = ov.font_path or DEFAULT_FONT
+            opts = [
+                f"fontfile='{font}'",
+                f"text={escaped}",
+                f"x={ov.x}",
+                f"y={ov.y}",
+                f"fontsize={ov.font_size}",
+                f"fontcolor={ov.font_color}@{ov.opacity:.3f}",
+                "borderw=2",
+                "bordercolor=white",
+            ]
             filters.append(
-                f"[{last_v}]drawtext{fp}"
-                f":text='{escaped}'"
-                f":x={ov.x}:y={ov.y}"
-                f":fontsize={ov.font_size}"
-                f":fontcolor={ov.font_color}@{ov.opacity:.3f}"
-                f"[vwith_text]"
+                f"[{last_v}]drawtext={':'.join(opts)}[vwith_text]"
             )
             last_v = "vwith_text"
 
     filters.append(f"[{last_v}]copy[vout]")
 
-    # Audio: use incoming audio if available, otherwise generate silence
+    # Audio: use incoming if available, otherwise generate silence
     if has_audio:
         filters.append(
             f"[0:a]aresample={a.sample_rate},"
             f"aformat=channel_layouts=stereo[aout]"
         )
-        audio_map = "[aout]"
     else:
-        cmd += [
-            "-f", "lavfi", "-i",
-            f"anullsrc=r={a.sample_rate}:cl=stereo",
-        ]
+        cmd += _anullsrc(a.sample_rate)
         filters.append(
-            f"[{input_count}:a]aformat=sample_rates={a.sample_rate}:"
+            f"[{input_idx}:a]aformat=sample_rates={a.sample_rate}:"
             f"channel_layouts=stereo[aout]"
         )
-        audio_map = "[aout]"
 
     cmd += ["-filter_complex", ";".join(filters)]
-    cmd += ["-map", "[vout]", "-map", audio_map]
-    cmd += _output_flags(cfg, dest)
+    cmd += ["-map", "[vout]", "-map", "[aout]"]
+    cmd += _encoding_flags(cfg)
+    cmd += ["-f", "flv", dest]
     return cmd
 
 
+# ---------------------------------------------------------------------------
+#  Output FFmpeg (persistent)
+# ---------------------------------------------------------------------------
+
 def build_output(cfg: Config) -> List[str]:
+    """Output FFmpeg — reads the compositor output from mediamtx (RTSP),
+    writes to all configured RTMP targets.
+
+    This process NEVER restarts during normal operation; it holds the
+    persistent RTMP connection to the target services.
+
+    Brief interruptions during compositor restarts (< 2 s) are absorbed
+    by the internal RTSP relay.  If the compositor crashes, the watchdog
+    restarts both processes.
     """
-    Output FFmpeg — reads from the mediamtx relay path, writes to all targets.
-    This process NEVER restarts; it holds the persistent RTMP connection
-    to the target services.
-    """
-    relay_url = f"rtsp://127.0.0.1:{cfg.internal_rtsp_port}/relay"
+    relay_url = (
+        f"rtsp://127.0.0.1:{cfg.internal_rtsp_port}/{cfg.composite_path}"
+    )
     targets = cfg.output.targets
 
     if not targets:
         raise ValueError("output.targets must not be empty")
 
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats",
+    cmd = _ffmpeg_base() + [
         "-rtsp_transport", "tcp",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
+        "-analyzeduration", "5000000",
+        "-probesize", "5000000",
+        "-use_wallclock_as_timestamps", "1",
         "-i", relay_url,
     ]
 
+    # Explicit -map 0 ensures all streams from the RTSP source are
+    # forwarded.  Without it the tee muxer may report "Output file does
+    # not contain any stream" when auto-selection fails.
+    cmd += ["-map", "0", "-c", "copy"]
+
     if len(targets) == 1:
-        cmd += ["-c", "copy", "-f", "flv", targets[0]]
+        cmd += ["-f", "flv", targets[0]]
     else:
-        # Tee muxer: send to multiple RTMP targets simultaneously
-        tee_str = "|".join(f"[f=flv]{t}" for t in targets)
-        cmd += ["-c", "copy", "-f", "tee", tee_str]
+        tee_str = "|".join(
+            f"[f=flv:onfail=ignore]{_escape_tee_url(t)}" for t in targets
+        )
+        cmd += ["-f", "tee", tee_str]
 
     return cmd

@@ -22,6 +22,8 @@ services:
       - "1935:1935/tcp"
       # SRT ingest
       - "8890:8890/udp"
+      # HLS ingest (uncomment if ingest.hls: true in config)
+      # - "8888:8888/tcp"
 
     environment:
       LOG_LEVEL: INFO
