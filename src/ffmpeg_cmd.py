@@ -137,7 +137,33 @@ def build_compositor_idle(cfg: Config) -> List[str]:
         cmd += ["-f", "flv", dest]
         return cmd
 
-    if ph.type == "text":
+    if ph.type == "testcard":
+        cmd += [
+            "-f", "lavfi", "-i",
+            f"testsrc2=s={v.width}x{v.height}:r={v.fps}:sar=1/1",
+        ]
+        cmd += _anullsrc(a.sample_rate)
+
+        font = ph.font_path or DEFAULT_FONT
+        # %{localtime} renders the system clock; TZ env var set by
+        # stream_manager controls the timezone for the subprocess.
+        time_text = "text=%{localtime\\:%H\\:%M\\:%S}"
+        opts = [
+            f"fontfile='{font}'",
+            time_text,
+            "fontsize=96",
+            "fontcolor=white",
+            "borderw=4",
+            "bordercolor=black@0.8",
+            "x=(w-text_w)/2",
+            "y=h-text_h-60",
+            "box=1",
+            "boxcolor=black@0.5",
+            "boxborderw=12",
+        ]
+        filters.append(f"[0:v]drawtext={':'.join(opts)}[vout]")
+
+    elif ph.type == "text":
         cmd += [
             "-f", "lavfi", "-i",
             f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",

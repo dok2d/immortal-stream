@@ -22,6 +22,7 @@ Redundancy:
 import asyncio
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.request
@@ -474,11 +475,18 @@ class StreamManager:
         """
         await self._terminate_process(self._compositor)
 
+        # Pass TZ env var so drawtext %{localtime} uses the configured timezone
+        env = os.environ.copy()
+        tz = self.cfg.placeholder.timezone
+        if tz:
+            env["TZ"] = tz
+
         log.info("Starting compositor [%s]: %s", label, " ".join(cmd))
         new_proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         asyncio.create_task(
             _log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING)
@@ -692,11 +700,17 @@ async def _log_stderr(
         line = await proc.stderr.readline()
         if not line:
             break
+        text = line.decode(errors="replace").rstrip()
+        # Downgrade noisy DTS discontinuity warnings to DEBUG —
+        # these are expected after compositor restarts and auto-corrected.
+        effective_level = level
+        if "Non-monotonic DTS" in text or "non monotone" in text.lower():
+            effective_level = logging.DEBUG
         log.log(
-            level,
+            effective_level,
             "[ffmpeg/%s] %s",
             label,
-            line.decode(errors="replace").rstrip(),
+            text,
         )
 
 

@@ -73,6 +73,46 @@ class TelegramBot:
             payload["reply_markup"] = {"inline_keyboard": keyboard}
         return await self._api("sendMessage", payload)
 
+    async def _send_prompt(self, text: str, cancel_cb: str = "menu:main") -> dict:
+        """Send a message with ForceReply markup.
+
+        In Telegram groups the bot only sees replies to its own messages.
+        Using force_reply ensures the user's response is tagged as a reply,
+        making it visible to the bot regardless of privacy settings.
+        """
+        payload = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": {
+                "force_reply": True,
+                "selective": True,
+            },
+        }
+        return await self._api("sendMessage", payload)
+
+    async def _download_file(self, file_id: str, dest_dir: str = "/media") -> str:
+        """Download a Telegram file by file_id and return the local path."""
+        resp = await self._api("getFile", {"file_id": file_id})
+        file_path = resp.get("result", {}).get("file_path", "")
+        if not file_path:
+            raise ValueError("Could not get file path from Telegram")
+
+        dl_url = (
+            f"https://api.telegram.org/file/bot"
+            f"{self.cfg.telegram.bot_token}/{file_path}"
+        )
+        ext = os.path.splitext(file_path)[1] or ".jpg"
+        local_path = os.path.join(dest_dir, f"tg_{file_id[:16]}{ext}")
+
+        os.makedirs(dest_dir, exist_ok=True)
+
+        def _fetch():
+            urllib.request.urlretrieve(dl_url, local_path)
+
+        await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        return local_path
+
     async def _edit(self, msg_id: int, text: str, keyboard=None) -> dict:
         payload = {
             "chat_id": self._chat_id,
@@ -193,6 +233,24 @@ class TelegramBot:
 
         text = (msg.get("text") or "").strip()
 
+        # Handle photo uploads when awaiting an image
+        photo = msg.get("photo")
+        if photo and self._awaiting and self._awaiting in (
+            "ph:image", "ov:image",
+        ):
+            action = self._awaiting
+            self._awaiting = None
+            try:
+                # Use the largest photo (last in the array)
+                file_id = photo[-1]["file_id"]
+                local_path = await self._download_file(file_id)
+                reply, kb = await self._handle_awaited(action, local_path)
+            except Exception as e:
+                reply = f"\u274c Failed to download photo: {e}"
+                kb = [[_btn("\u25c0\ufe0f Menu", "menu:main")]]
+            await self._send(reply, kb)
+            return
+
         # Awaited text input from a button flow
         if self._awaiting and not text.startswith("/"):
             action = self._awaiting
@@ -256,10 +314,29 @@ class TelegramBot:
                 _kb_ph(self.cfg), "Black",
             )
 
+        if act == "testcard":
+            self.cfg.placeholder.type = "testcard"
+            self.cfg.placeholder.path = None
+            self.cfg.placeholder.text = None
+            await self.manager.reload_compositor()
+            return (
+                self._text_ph() + "\n\n\u2705 Test card with clock",
+                _kb_ph(self.cfg), "Testcard",
+            )
+
+        if act == "tz":
+            self._awaiting = "ph:tz"
+            await self._send_prompt(
+                f"Current timezone: <code>{self.cfg.placeholder.timezone}</code>\n"
+                "Send new timezone (e.g. <code>Europe/Moscow</code>, "
+                "<code>US/Eastern</code>, <code>UTC</code>):"
+            )
+            return None, None, ""
+
         if act in ("text", "image", "video", "opacity"):
             labels = {
                 "text": "\u270f\ufe0f Send placeholder text:",
-                "image": "\U0001f4ce Send image file path:",
+                "image": "\U0001f4ce Send image file path or send a photo:",
                 "video": "\U0001f3ac Send video file path:",
                 "opacity": (
                     f"Current: {self.cfg.placeholder.opacity:.2f}\n"
@@ -267,7 +344,8 @@ class TelegramBot:
                 ),
             }
             self._awaiting = f"ph:{act}"
-            return labels[act], [[_btn("\u274c Cancel", "ph:menu")]], ""
+            await self._send_prompt(labels[act])
+            return None, None, ""
 
         return self._text_ph(), _kb_ph(self.cfg), ""
 
@@ -291,7 +369,7 @@ class TelegramBot:
 
         prompts = {
             "text":    "\u270f\ufe0f Send overlay text:",
-            "image":   "\U0001f4ce Send overlay image path:",
+            "image":   "\U0001f4ce Send overlay image path or send a photo:",
             "pos":     f"Current: ({self.cfg.overlay.x}, {self.cfg.overlay.y})\nSend as <code>X Y</code>:",
             "opacity": f"Current: {self.cfg.overlay.opacity:.2f}\nSend value (0.0\u20131.0):",
             "size":    f"Current: {self.cfg.overlay.font_size}px\nSend new size:",
@@ -299,7 +377,8 @@ class TelegramBot:
         }
         if act in prompts:
             self._awaiting = f"ov:{act}"
-            return prompts[act], [[_btn("\u274c Cancel", "ov:menu")]], ""
+            await self._send_prompt(prompts[act])
+            return None, None, ""
 
         return self._text_ov(), _kb_ov(self.cfg), ""
 
@@ -313,10 +392,8 @@ class TelegramBot:
 
         if act == "add":
             self._awaiting = "target:add"
-            return (
-                "\U0001f517 Send the RTMP/RTMPS URL:",
-                [[_btn("\u274c Cancel", "target:menu")]], "",
-            )
+            await self._send_prompt("\U0001f517 Send the RTMP/RTMPS URL:")
+            return None, None, ""
 
         if act == "rm":
             idx = int(p[2]) if len(p) > 2 else -1
@@ -348,7 +425,8 @@ class TelegramBot:
         }
         if act in prompts:
             self._awaiting = f"out:{act}"
-            return prompts[act], [[_btn("\u274c Cancel", "out:menu")]], ""
+            await self._send_prompt(prompts[act])
+            return None, None, ""
 
         if act == "preset":
             return self._text_output(), _kb_presets(), ""
@@ -423,6 +501,12 @@ class TelegramBot:
             self.cfg.placeholder.opacity = v
             await self.manager.reload_compositor()
             return f"\u2705 Opacity: {v:.2f}", _kb_ph(self.cfg)
+
+        if action == "ph:tz":
+            tz = text.strip()
+            self.cfg.placeholder.timezone = tz
+            await self.manager.reload_compositor()
+            return f"\u2705 Timezone: <code>{tz}</code>", _kb_ph(self.cfg)
 
         # -- Overlay --
         if action == "ov:text":
@@ -565,6 +649,21 @@ class TelegramBot:
             self.cfg.placeholder.text = None
             await self.manager.reload_compositor()
             return "\u2705 Placeholder \u2192 black"
+
+        if sub == "testcard":
+            self.cfg.placeholder.type = "testcard"
+            self.cfg.placeholder.path = None
+            self.cfg.placeholder.text = None
+            await self.manager.reload_compositor()
+            return "\u2705 Placeholder \u2192 testcard (clock overlay)"
+
+        if sub == "timezone":
+            tz = arg_str[len("timezone"):].strip()
+            if not tz:
+                return f"Current: <code>{self.cfg.placeholder.timezone}</code>\nUsage: /placeholder timezone <TZ>"
+            self.cfg.placeholder.timezone = tz
+            await self.manager.reload_compositor()
+            return f"\u2705 Timezone \u2192 <code>{tz}</code>"
 
         if sub == "text":
             text = arg_str[len("text"):].strip().strip("\"'")
@@ -833,6 +932,8 @@ class TelegramBot:
         desc = f"<b>Placeholder:</b> {ph.type}"
         if ph.type == "text" and ph.text:
             desc += f"\nText: <code>{ph.text}</code>"
+        elif ph.type == "testcard":
+            desc += f"\nTimezone: <code>{ph.timezone}</code>"
         elif ph.path:
             desc += f"\nFile: <code>{ph.path}</code>"
         desc += f"\nOpacity: {ph.opacity:.2f}"
@@ -931,7 +1032,13 @@ def _kb_ph(cfg: Config):
             _btn(f"\U0001f5bc Image{check('image')}", "ph:image"),
             _btn(f"\U0001f3ac Video{check('video')}", "ph:video"),
         ],
-        [_btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "ph:opacity")],
+        [
+            _btn(f"\U0001f4fa Testcard{check('testcard')}", "ph:testcard"),
+        ],
+        [
+            _btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "ph:opacity"),
+            _btn(f"\U0001f30d TZ ({ph.timezone})", "ph:tz"),
+        ],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
     ]
 

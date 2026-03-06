@@ -67,9 +67,14 @@ ingest:
 # ── Placeholder layer ──────────────────────────────────────────────────────────
 # Shown to the target service whenever no incoming stream is active.
 placeholder:
-  # Type: black | text | image | video
+  # Type: black | text | image | video | testcard
+  # "testcard" is the default — colour bars with a live clock overlay.
   # "black" requires no files — good for testing out of the box.
-  type: black
+  type: testcard
+
+  # Timezone for the testcard clock (IANA tz database name).
+  # Examples: UTC, Europe/Moscow, US/Eastern, Asia/Tokyo
+  timezone: UTC
 
   # ── Text placeholder ─────────────────────────────────────────────
   # (used when type: text)
@@ -158,7 +163,7 @@ output:
 #   /status                    — current state and settings
 #   /stop                      — pause all processes (compositor + output)
 #   /resume                    — restart all processes
-#   /placeholder black|text|image|video|opacity
+#   /placeholder black|testcard|text|image|video|opacity|timezone
 #   /overlay off|text|image|x|y|opacity|size|color
 #   /target list|add|remove|set
 #   /output bitrate|fps|size|preset

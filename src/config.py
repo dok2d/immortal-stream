@@ -9,7 +9,7 @@ import yaml
 
 log = logging.getLogger("config")
 
-_VALID_PLACEHOLDER_TYPES = {"black", "text", "image", "video"}
+_VALID_PLACEHOLDER_TYPES = {"black", "text", "image", "video", "testcard"}
 _VALID_OVERLAY_TYPES = {"image", "text"}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _X264_PRESETS = {
@@ -20,7 +20,7 @@ _X264_PRESETS = {
 
 @dataclass
 class PlaceholderConfig:
-    type: str = "black"
+    type: str = "testcard"
     path: Optional[str] = None
     text: Optional[str] = None
     font_path: Optional[str] = None
@@ -29,6 +29,7 @@ class PlaceholderConfig:
     x: int = 0
     y: int = 0
     opacity: float = 1.0
+    timezone: str = "UTC"
 
 
 @dataclass
