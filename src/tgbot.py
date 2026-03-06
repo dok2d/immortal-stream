@@ -86,7 +86,7 @@ class TelegramBot:
             "parse_mode": "HTML",
             "reply_markup": {
                 "force_reply": True,
-                "selective": True,
+                "selective": False,
             },
         }
         return await self._api("sendMessage", payload)

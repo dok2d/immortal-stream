@@ -177,7 +177,7 @@ def build_compositor_idle(cfg: Config) -> List[str]:
         x_expr = str(ph.x) if ph.x else "(w-text_w)/2"
         y_expr = str(ph.y) if ph.y else "(h-text_h)/2"
         opts = [
-            f"fontfile='{font}'",
+            f"fontfile={font}",
             f"text={escaped}",
             f"x={x_expr}",
             f"y={y_expr}",
@@ -264,7 +264,7 @@ def build_compositor_live(
             escaped = _escape_drawtext(ov.text)
             font = ov.font_path or DEFAULT_FONT
             opts = [
-                f"fontfile='{font}'",
+                f"fontfile={font}",
                 f"text={escaped}",
                 f"x={ov.x}",
                 f"y={ov.y}",
