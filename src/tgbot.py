@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import urllib.request
 from typing import Callable, Optional, TYPE_CHECKING
 
@@ -365,7 +366,6 @@ class TelegramBot:
         if act == "black":
             self.cfg.placeholder.type = "black"
             self.cfg.placeholder.path = None
-            self.cfg.placeholder.text = None
             await self.manager.reload_compositor()
             return (
                 self._text_ph() + "\n\n\u2705 Black screen",
@@ -375,25 +375,20 @@ class TelegramBot:
         if act == "testcard":
             self.cfg.placeholder.type = "testcard"
             self.cfg.placeholder.path = None
-            self.cfg.placeholder.text = None
             await self.manager.reload_compositor()
             return (
                 self._text_ph() + "\n\n\u2705 Test card with clock",
                 _kb_ph(self.cfg), "Testcard",
             )
 
-        if act == "tz":
-            self._awaiting = "ph:tz"
-            await self._send_prompt(
-                f"Current timezone: <code>{self.cfg.placeholder.timezone}</code>\n"
-                "Send new timezone (e.g. <code>Europe/Moscow</code>, "
-                "<code>US/Eastern</code>, <code>UTC</code>):"
-            )
-            return None, None, ""
-
         if act == "text":
             self._awaiting = "ph:text"
-            await self._send_prompt("\u270f\ufe0f Send placeholder text:")
+            await self._send_prompt(
+                "\u270f\ufe0f Send text to overlay on the placeholder.\n"
+                "This text is additive — it appears on top of the current "
+                "base type (black/testcard/image/video).\n"
+                "Send <code>off</code> to remove text."
+            )
             return None, None, ""
 
         if act == "image":
@@ -561,11 +556,17 @@ class TelegramBot:
 
         # -- Placeholder --
         if action == "ph:text":
-            self.cfg.placeholder.type = "text"
-            self.cfg.placeholder.text = text.strip("\"'")
-            self.cfg.placeholder.path = None
+            val = text.strip().strip("\"'")
+            if val.lower() == "off":
+                self.cfg.placeholder.text = None
+                await self.manager.reload_compositor()
+                return "\u2705 Placeholder text removed", _kb_ph(self.cfg)
+            self.cfg.placeholder.text = val
             await self.manager.reload_compositor()
-            return f"\u2705 Placeholder text:\n<code>{text}</code>", _kb_ph(self.cfg)
+            return (
+                f"\u2705 Placeholder text overlay:\n<code>{val}</code>",
+                _kb_ph(self.cfg),
+            )
 
         if action in ("ph:image", "ph:video"):
             kind = action.split(":")[1]
@@ -573,7 +574,6 @@ class TelegramBot:
                 return f"\u274c File not found: <code>{text}</code>", _kb_ph(self.cfg)
             self.cfg.placeholder.type = kind
             self.cfg.placeholder.path = text
-            self.cfg.placeholder.text = None
             await self.manager.reload_compositor()
             label = "\U0001f5bc" if kind == "image" else "\U0001f3ac"
             return (
@@ -582,18 +582,15 @@ class TelegramBot:
             )
 
         if action == "ph:opacity":
-            v = float(text)
+            try:
+                v = float(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ph(self.cfg)
             if not 0.0 <= v <= 1.0:
                 return "\u274c Must be 0.0\u20131.0", _kb_ph(self.cfg)
             self.cfg.placeholder.opacity = v
             await self.manager.reload_compositor()
             return f"\u2705 Opacity: {v:.2f}", _kb_ph(self.cfg)
-
-        if action == "ph:tz":
-            tz = text.strip()
-            self.cfg.placeholder.timezone = tz
-            await self.manager.reload_compositor()
-            return f"\u2705 Timezone: <code>{tz}</code>", _kb_ph(self.cfg)
 
         # -- Overlay --
         if action == "ov:text":
@@ -615,8 +612,11 @@ class TelegramBot:
         if action == "ov:pos":
             parts = text.split()
             if len(parts) < 2:
-                return "\u274c Send as: X Y", _kb_ov(self.cfg)
-            x, y = int(parts[0]), int(parts[1])
+                return "\u274c Send as: <code>X Y</code>", _kb_ov(self.cfg)
+            try:
+                x, y = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                return "\u274c X and Y must be integers", _kb_ov(self.cfg)
             self.cfg.overlay.x = x
             self.cfg.overlay.y = y
             if self.cfg.overlay.enabled:
@@ -624,7 +624,10 @@ class TelegramBot:
             return f"\u2705 Position: ({x}, {y})", _kb_ov(self.cfg)
 
         if action == "ov:opacity":
-            v = float(text)
+            try:
+                v = float(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ov(self.cfg)
             if not 0.0 <= v <= 1.0:
                 return "\u274c Must be 0.0\u20131.0", _kb_ov(self.cfg)
             self.cfg.overlay.opacity = v
@@ -633,7 +636,12 @@ class TelegramBot:
             return f"\u2705 Opacity: {v:.2f}", _kb_ov(self.cfg)
 
         if action == "ov:size":
-            v = int(text)
+            try:
+                v = int(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be an integer", _kb_ov(self.cfg)
+            if not 1 <= v <= 500:
+                return "\u274c Font size must be 1\u2013500", _kb_ov(self.cfg)
             self.cfg.overlay.font_size = v
             if self.cfg.overlay.enabled:
                 await self.manager.reload_compositor()
@@ -648,6 +656,12 @@ class TelegramBot:
         # -- Targets --
         if action == "target:add":
             url = text.strip()
+            if not _is_valid_rtmp_url(url):
+                return (
+                    "\u274c Invalid URL. Must start with "
+                    "<code>rtmp://</code> or <code>rtmps://</code>",
+                    _kb_targets(self.cfg),
+                )
             if url in self.cfg.output.targets:
                 return f"Already present:\n<code>{url}</code>", _kb_targets(self.cfg)
             self.cfg.output.targets.append(url)
@@ -656,24 +670,37 @@ class TelegramBot:
 
         # -- Output encoding --
         if action == "out:bitrate":
-            self.cfg.output.video.bitrate = text.strip()
+            val = text.strip().lower()
+            if not _is_valid_bitrate(val):
+                return (
+                    "\u274c Invalid bitrate. Examples: "
+                    "<code>6000k</code>, <code>8M</code>, <code>4500k</code>",
+                    _kb_out(self.cfg),
+                )
+            self.cfg.output.video.bitrate = val
             await self.manager.reload_compositor()
-            return f"\u2705 Bitrate: {text.strip()}", _kb_out(self.cfg)
+            return f"\u2705 Bitrate: {val}", _kb_out(self.cfg)
 
         if action == "out:fps":
-            fps = int(text)
+            try:
+                fps = int(text)
+            except (ValueError, TypeError):
+                return "\u274c FPS must be an integer (1\u2013120)", _kb_out(self.cfg)
             if not 1 <= fps <= 120:
-                return "\u274c Must be 1\u2013120", _kb_out(self.cfg)
+                return "\u274c FPS must be 1\u2013120", _kb_out(self.cfg)
             self.cfg.output.video.fps = fps
             self.cfg.output.video.gop = fps * 2
             await self.manager.reload_compositor()
             return f"\u2705 FPS: {fps} (gop={fps * 2})", _kb_out(self.cfg)
 
         if action == "out:size":
-            w_s, h_s = text.lower().split("x")
-            w, h = int(w_s), int(h_s)
+            try:
+                w_s, h_s = text.lower().split("x")
+                w, h = int(w_s), int(h_s)
+            except (ValueError, TypeError):
+                return "\u274c Format: <code>WxH</code> (e.g. 1920x1080)", _kb_out(self.cfg)
             if not (160 <= w <= 7680 and 90 <= h <= 4320):
-                return "\u274c Invalid size range", _kb_out(self.cfg)
+                return "\u274c Size out of range (160\u20137680 x 90\u20134320)", _kb_out(self.cfg)
             self.cfg.output.video.width = w
             self.cfg.output.video.height = h
             await self.manager.reload_compositor()
@@ -733,34 +760,26 @@ class TelegramBot:
         if sub == "black":
             self.cfg.placeholder.type = "black"
             self.cfg.placeholder.path = None
-            self.cfg.placeholder.text = None
             await self.manager.reload_compositor()
             return "\u2705 Placeholder \u2192 black"
 
         if sub == "testcard":
             self.cfg.placeholder.type = "testcard"
             self.cfg.placeholder.path = None
-            self.cfg.placeholder.text = None
             await self.manager.reload_compositor()
             return "\u2705 Placeholder \u2192 testcard (clock overlay)"
-
-        if sub == "timezone":
-            tz = arg_str[len("timezone"):].strip()
-            if not tz:
-                return f"Current: <code>{self.cfg.placeholder.timezone}</code>\nUsage: /placeholder timezone <TZ>"
-            self.cfg.placeholder.timezone = tz
-            await self.manager.reload_compositor()
-            return f"\u2705 Timezone \u2192 <code>{tz}</code>"
 
         if sub == "text":
             text = arg_str[len("text"):].strip().strip("\"'")
             if not text:
-                return "Usage: /placeholder text <text>"
-            self.cfg.placeholder.type = "text"
+                return "Usage: /placeholder text <text>  (or 'off' to remove)"
+            if text.lower() == "off":
+                self.cfg.placeholder.text = None
+                await self.manager.reload_compositor()
+                return "\u2705 Placeholder text removed"
             self.cfg.placeholder.text = text
-            self.cfg.placeholder.path = None
             await self.manager.reload_compositor()
-            return f"\u2705 Placeholder \u2192 text: <code>{text}</code>"
+            return f"\u2705 Placeholder text overlay: <code>{text}</code>"
 
         if sub in ("image", "video"):
             path = arg_str[len(sub):].strip()
@@ -770,7 +789,6 @@ class TelegramBot:
                 return f"\u274c File not found: <code>{path}</code>"
             self.cfg.placeholder.type = sub
             self.cfg.placeholder.path = path
-            self.cfg.placeholder.text = None
             await self.manager.reload_compositor()
             return f"\u2705 Placeholder \u2192 {sub}: <code>{path}</code>"
 
@@ -858,6 +876,8 @@ class TelegramBot:
             if len(args) < 2:
                 return "Usage: /target add <rtmp://...>"
             url = args[1]
+            if not _is_valid_rtmp_url(url):
+                return "\u274c URL must start with rtmp:// or rtmps://"
             if url in self.cfg.output.targets:
                 return f"Already present: <code>{url}</code>"
             self.cfg.output.targets.append(url)
@@ -878,6 +898,8 @@ class TelegramBot:
         if sub == "set":
             if len(args) < 2:
                 return "Usage: /target set <rtmp://...>"
+            if not _is_valid_rtmp_url(args[1]):
+                return "\u274c URL must start with rtmp:// or rtmps://"
             self.cfg.output.targets = [args[1]]
             await self.manager.reload_output()
             return f"\u2705 Target set: <code>{args[1]}</code>"
@@ -895,9 +917,12 @@ class TelegramBot:
         if sub == "bitrate":
             if len(args) < 2:
                 return "Usage: /output bitrate <value>"
-            self.cfg.output.video.bitrate = args[1]
+            val = args[1].lower()
+            if not _is_valid_bitrate(val):
+                return "\u274c Invalid bitrate (e.g. 6000k, 8M)"
+            self.cfg.output.video.bitrate = val
             await self.manager.reload_compositor()
-            return f"\u2705 Bitrate \u2192 {args[1]}"
+            return f"\u2705 Bitrate \u2192 {val}"
 
         if sub == "fps":
             if len(args) < 2:
@@ -978,12 +1003,12 @@ class TelegramBot:
             state = "\u26ab <b>IDLE</b> (placeholder active)"
 
         ph_desc = ph.type
-        if ph.type == "text" and ph.text:
-            ph_desc += f": <code>{ph.text}</code>"
-        elif ph.type == "testcard":
+        if ph.type == "testcard":
             ph_desc += f" ({ph.timezone})"
         elif ph.path:
             ph_desc += f": <code>{os.path.basename(ph.path)}</code>"
+        if ph.text:
+            ph_desc += f"\n  text: <code>{ph.text}</code>"
         if ph.opacity < 1.0:
             ph_desc += f" opacity={ph.opacity:.2f}"
 
@@ -1019,12 +1044,12 @@ class TelegramBot:
     def _text_ph(self) -> str:
         ph = self.cfg.placeholder
         desc = f"<b>Placeholder:</b> {ph.type}"
-        if ph.type == "text" and ph.text:
-            desc += f"\nText: <code>{ph.text}</code>"
-        elif ph.type == "testcard":
-            desc += f"\nTimezone: <code>{ph.timezone}</code>"
-        elif ph.path:
+        if ph.type == "testcard":
+            desc += f" ({ph.timezone})"
+        if ph.path:
             desc += f"\nFile: <code>{os.path.basename(ph.path)}</code>"
+        if ph.text:
+            desc += f"\nText overlay: <code>{ph.text}</code>"
         desc += f"\nOpacity: {ph.opacity:.2f}"
         return desc
 
@@ -1112,19 +1137,19 @@ def _kb_status():
 def _kb_ph(cfg: Config):
     ph = cfg.placeholder
     check = lambda t: " \u2705" if ph.type == t else ""
+    text_label = "\U0001f4dd Text \u2705" if ph.text else "\U0001f4dd Text"
     rows = [
         [
             _btn(f"\u2b1b Black{check('black')}", "ph:black"),
             _btn(f"\U0001f4fa Testcard{check('testcard')}", "ph:testcard"),
         ],
         [
-            _btn(f"\U0001f4dd Text{check('text')}", "ph:text"),
             _btn(f"\U0001f5bc Image{check('image')}", "ph:image"),
             _btn(f"\U0001f3ac Video{check('video')}", "ph:video"),
         ],
         [
+            _btn(text_label, "ph:text"),
             _btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "ph:opacity"),
-            _btn(f"\U0001f30d TZ ({ph.timezone})", "ph:tz"),
         ],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
     ]
@@ -1209,6 +1234,16 @@ def _kb_power(manager):
 # ═══════════════════════════════════════════════════════════════════════════
 #  Helpers
 # ═══════════════════════════════════════════════════════════════════════════
+
+def _is_valid_rtmp_url(url: str) -> bool:
+    """Validate that URL starts with rtmp:// or rtmps://."""
+    return bool(re.match(r"^rtmps?://\S+", url))
+
+
+def _is_valid_bitrate(val: str) -> bool:
+    """Validate bitrate format like '6000k', '8M', '4500000'."""
+    return bool(re.match(r"^\d+[kKmM]?$", val.strip()))
+
 
 def _short_url(url: str) -> str:
     """Shorten an RTMP URL for display in buttons/status."""

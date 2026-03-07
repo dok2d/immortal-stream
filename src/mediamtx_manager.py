@@ -16,8 +16,8 @@ YAML configuration.  Two formats are supported:
 Version is detected by running `mediamtx --version` before the process is
 started.  If detection fails, v1.x is assumed (matches the Containerfile ARG).
 
-The compositor uses a secret random path name (cfg.composite_path) so no
-per-path auth credentials are needed regardless of version.
+mediamtx is used only for external stream ingest.  The compositor→output
+link uses UDP/MPEG-TS directly, bypassing mediamtx entirely.
 """
 import asyncio
 import logging
@@ -102,8 +102,6 @@ def _gen_config_v1(cfg: Config) -> str:
         "pathDefaults:\n"
         "paths:\n"
         "  all_others:\n"
-        f"  {cfg.composite_path}:\n"
-        "    overridePublisher: true\n"
     )
 
 
@@ -132,8 +130,6 @@ def _gen_config_v0(cfg: Config) -> str:
         "\n"
         "paths:\n"
         "  all:\n"
-        f"  {cfg.composite_path}:\n"
-        "    overridePublisher: yes\n"
     )
 
 
