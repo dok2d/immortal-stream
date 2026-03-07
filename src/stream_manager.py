@@ -713,13 +713,14 @@ async def _log_stderr(
         if not line:
             break
         text = line.decode(errors="replace").rstrip()
-        # Downgrade noisy DTS discontinuity warnings to DEBUG —
-        # these are expected after compositor restarts and auto-corrected.
-        effective_level = level
+        # Completely suppress DTS discontinuity warnings — the tee muxer
+        # auto-corrects non-monotonic timestamps and these messages carry
+        # no diagnostic value; they only spam the log during normal
+        # compositor restarts and target changes.
         if "Non-monotonic DTS" in text or "non monotone" in text.lower():
-            effective_level = logging.DEBUG
+            continue
         log.log(
-            effective_level,
+            level,
             "[ffmpeg/%s] %s",
             label,
             text,

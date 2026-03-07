@@ -326,6 +326,7 @@ def build_output(cfg: Config) -> List[str]:
         raise ValueError("output.targets must not be empty")
 
     cmd = _ffmpeg_base() + [
+        "-fflags", "+genpts",
         "-rtsp_transport", "tcp",
         "-analyzeduration", "5000000",
         "-probesize", "5000000",
@@ -337,6 +338,10 @@ def build_output(cfg: Config) -> List[str]:
     # forwarded.  Without it the tee muxer may report "Output file does
     # not contain any stream" when auto-selection fails.
     cmd += ["-map", "0", "-c", "copy"]
+    # Shift timestamps so they start at zero.  This avoids non-monotonic
+    # DTS warnings in the tee muxer when the compositor restarts and the
+    # RTSP source delivers packets with a fresh timestamp epoch.
+    cmd += ["-avoid_negative_ts", "make_zero"]
 
     if len(targets) == 1:
         cmd += ["-f", "flv", targets[0]]
