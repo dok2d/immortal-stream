@@ -128,7 +128,7 @@ def build_compositor_idle(cfg: Config) -> List[str]:
 
     if ph.type == "black":
         cmd += [
-            "-f", "lavfi", "-i",
+            "-re", "-f", "lavfi", "-i",
             f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
         ]
         cmd += _anullsrc(a.sample_rate)
@@ -139,7 +139,7 @@ def build_compositor_idle(cfg: Config) -> List[str]:
 
     if ph.type == "testcard":
         cmd += [
-            "-f", "lavfi", "-i",
+            "-re", "-f", "lavfi", "-i",
             f"testsrc2=s={v.width}x{v.height}:r={v.fps}:sar=1/1",
         ]
         cmd += _anullsrc(a.sample_rate)
@@ -169,7 +169,7 @@ def build_compositor_idle(cfg: Config) -> List[str]:
 
     elif ph.type == "text":
         cmd += [
-            "-f", "lavfi", "-i",
+            "-re", "-f", "lavfi", "-i",
             f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
         ]
         cmd += _anullsrc(a.sample_rate)

@@ -724,11 +724,15 @@ async def _log_stderr(
         if not line:
             break
         text = line.decode(errors="replace").rstrip()
-        # Completely suppress DTS discontinuity warnings — the tee muxer
-        # auto-corrects non-monotonic timestamps and these messages carry
-        # no diagnostic value; they only spam the log during normal
-        # compositor restarts and target changes.
-        if "Non-monotonic DTS" in text or "non monotone" in text.lower():
+        # Suppress noise that carries no diagnostic value:
+        # - Non-monotonic DTS: tee muxer auto-corrects timestamps
+        # - deprecated pixel format: harmless swscaler format conversion
+        # - %{localtime} requires: old compositor drawtext teardown
+        if any(s in text for s in (
+            "Non-monotonic DTS",
+            "deprecated pixel format",
+            "%{localtime}",
+        )) or "non monotone" in text.lower():
             continue
         log.log(
             level,
