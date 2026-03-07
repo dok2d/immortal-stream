@@ -29,7 +29,6 @@ class PlaceholderConfig:
     x: int = 0
     y: int = 0
     opacity: float = 1.0
-    timezone: str = "UTC"
 
 
 @dataclass

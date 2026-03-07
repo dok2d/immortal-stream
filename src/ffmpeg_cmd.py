@@ -35,6 +35,63 @@ def _scale_pad(v: VideoConfig, src_label: str, dst_label: str) -> str:
     )
 
 
+_NAMED_COLORS_LIGHT = {
+    "white", "yellow", "cyan", "lime", "aqua", "lightyellow", "lightyellow",
+    "lightcyan", "lightgreen", "ivory", "snow", "seashell", "mintcream",
+    "azure", "ghostwhite", "floralwhite", "honeydew", "lemonchiffon",
+    "cornsilk", "beige", "linen", "oldlace", "lavenderblush", "mistyrose",
+    "papayawhip", "blanchedalmond", "bisque", "moccasin", "navajowhite",
+    "peachpuff", "wheat", "antiquewhite", "lavender", "thistle", "pink",
+    "lightpink", "lightsalmon", "lightskyblue", "lightsteelblue",
+    "lightblue", "lightcoral", "palegreen", "palegoldenrod", "paleturquoise",
+    "palevioletred", "powderblue", "khaki", "gold", "orange", "plum",
+    "silver", "gainsboro", "lightgray", "lightgrey",
+}
+
+_NAMED_COLORS_DARK = {
+    "black", "darkblue", "darkred", "darkgreen", "darkmagenta", "darkcyan",
+    "darkviolet", "darkolivegreen", "darkslategray", "darkslategrey",
+    "darkslateblue", "midnightblue", "navy", "maroon", "indigo", "brown",
+    "saddlebrown", "sienna", "dimgray", "dimgrey",
+}
+
+
+def _is_light_color(color: str) -> bool:
+    """Determine if a color name or hex value is 'light' (high luminance).
+
+    Uses simple heuristics: named-color lookup, then hex-value luminance.
+    Falls back to True (assume light) for unknown names.
+    """
+    c = color.lower().strip()
+    if c in _NAMED_COLORS_LIGHT:
+        return True
+    if c in _NAMED_COLORS_DARK:
+        return False
+    # Try hex parsing: #RGB, #RRGGBB, 0xRRGGBB
+    hex_str = c.lstrip("#").lstrip("0x")
+    try:
+        if len(hex_str) == 3:
+            r, g, b = (int(h * 2, 16) for h in hex_str)
+        elif len(hex_str) == 6:
+            r = int(hex_str[0:2], 16)
+            g = int(hex_str[2:4], 16)
+            b = int(hex_str[4:6], 16)
+        else:
+            return True  # unknown → assume light
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        return lum > 128
+    except (ValueError, TypeError):
+        return True  # unknown → assume light
+
+
+def _border_opts(font_color: str) -> list:
+    """Return drawtext border options: thin outline in contrasting color."""
+    if _is_light_color(font_color):
+        return ["borderw=2", "bordercolor=black"]
+    else:
+        return ["borderw=2", "bordercolor=white"]
+
+
 def _escape_drawtext(text: str) -> str:
     r"""Escape text for FFmpeg drawtext filter inside a filter_complex string.
 
@@ -136,8 +193,8 @@ def _placeholder_text_filter(
         return None
     escaped = _escape_drawtext(ph.text)
     font = ph.font_path or DEFAULT_FONT
-    x_expr = str(ph.x) if ph.x else "(w-text_w)/2"
-    y_expr = str(ph.y) if ph.y else "(h-text_h)/2"
+    x_expr = str(ph.x) if ph.x is not None and ph.x != 0 else "(w-text_w)/2"
+    y_expr = str(ph.y) if ph.y is not None and ph.y != 0 else "(h-text_h)/2"
     opts = [
         f"fontfile={font}",
         f"text={escaped}",
@@ -145,7 +202,7 @@ def _placeholder_text_filter(
         f"y={y_expr}",
         f"fontsize={ph.font_size}",
         f"fontcolor={ph.font_color}@{ph.opacity:.3f}",
-    ]
+    ] + _border_opts(ph.font_color)
     return f"[{src_label}]drawtext={':'.join(opts)}[{dst_label}]"
 
 
@@ -187,21 +244,7 @@ def build_compositor_idle(cfg: Config) -> List[str]:
             f"testsrc2=s={v.width}x{v.height}:r={v.fps}:sar=1/1",
         ]
         cmd += _anullsrc(a.sample_rate)
-
-        font = ph.font_path or DEFAULT_FONT
-        time_text = "text=%{localtime\\\\:%H\\\\:%M\\\\:%S}"
-        opts = [
-            f"fontfile={font}",
-            time_text,
-            "fontsize=96",
-            "fontcolor=white",
-            "x=(w-text_w)/2",
-            "y=h-text_h-60",
-            "box=1",
-            "boxcolor=black@0.5",
-            "boxborderw=12",
-        ]
-        filters.append(f"[0:v]drawtext={':'.join(opts)}[vbase]")
+        filters.append("[0:v]copy[vbase]")
 
     elif ph.type == "image":
         cmd += ["-re", "-loop", "1", "-i", ph.path]
@@ -311,7 +354,7 @@ def build_compositor_live(
                 f"y={ov.y}",
                 f"fontsize={ov.font_size}",
                 f"fontcolor={ov.font_color}@{ov.opacity:.3f}",
-            ]
+            ] + _border_opts(ov.font_color)
             filters.append(
                 f"[{last_v}]drawtext={':'.join(opts)}[vwith_text]"
             )

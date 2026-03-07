@@ -377,7 +377,7 @@ class TelegramBot:
             self.cfg.placeholder.path = None
             await self.manager.reload_compositor()
             return (
-                self._text_ph() + "\n\n\u2705 Test card with clock",
+                self._text_ph() + "\n\n\u2705 Test card",
                 _kb_ph(self.cfg), "Testcard",
             )
 
@@ -411,6 +411,16 @@ class TelegramBot:
             await self._send_prompt(
                 f"Current: {self.cfg.placeholder.opacity:.2f}\n"
                 "Send new value (0.0\u20131.0):"
+            )
+            return None, None, ""
+
+        if act == "pos":
+            self._awaiting = "ph:pos"
+            ph = self.cfg.placeholder
+            await self._send_prompt(
+                f"Current position: {ph.x},{ph.y}\n"
+                "Send <code>x,y</code> coordinates for the text.\n"
+                "Use <code>0,0</code> for center (default)."
             )
             return None, None, ""
 
@@ -592,6 +602,19 @@ class TelegramBot:
             await self.manager.reload_compositor()
             return f"\u2705 Opacity: {v:.2f}", _kb_ph(self.cfg)
 
+        if action == "ph:pos":
+            parts = text.replace(" ", "").split(",")
+            if len(parts) != 2:
+                return "\u274c Format: <code>x,y</code> (e.g. 100,200)", _kb_ph(self.cfg)
+            try:
+                x, y = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                return "\u274c Coordinates must be integers", _kb_ph(self.cfg)
+            self.cfg.placeholder.x = x
+            self.cfg.placeholder.y = y
+            await self.manager.reload_compositor()
+            return f"\u2705 Text position: ({x},{y})", _kb_ph(self.cfg)
+
         # -- Overlay --
         if action == "ov:text":
             self.cfg.overlay.enabled = True
@@ -767,7 +790,7 @@ class TelegramBot:
             self.cfg.placeholder.type = "testcard"
             self.cfg.placeholder.path = None
             await self.manager.reload_compositor()
-            return "\u2705 Placeholder \u2192 testcard (clock overlay)"
+            return "\u2705 Placeholder \u2192 testcard"
 
         if sub == "text":
             text = arg_str[len("text"):].strip().strip("\"'")
@@ -797,6 +820,23 @@ class TelegramBot:
                 args, self.cfg.placeholder, "opacity",
                 0.0, 1.0, self.manager.reload_compositor, "Opacity",
             )
+
+        if sub in ("pos", "position"):
+            coords = arg_str[len(sub):].strip()
+            if not coords:
+                return "Usage: /placeholder pos <x>,<y>  (0,0 = center)"
+            parts = coords.replace(" ", "").split(",")
+            if len(parts) != 2:
+                return "\u274c Format: <code>x,y</code>"
+            try:
+                x, y = int(parts[0]), int(parts[1])
+            except ValueError:
+                return "\u274c Coordinates must be integers"
+            self.cfg.placeholder.x = x
+            self.cfg.placeholder.y = y
+            await self.manager.reload_compositor()
+            return f"\u2705 Text position: ({x},{y})"
+
         return f"\u2753 Unknown: /placeholder {sub}"
 
     # -- Text: /overlay ----------------------------------------------------
@@ -1003,12 +1043,12 @@ class TelegramBot:
             state = "\u26ab <b>IDLE</b> (placeholder active)"
 
         ph_desc = ph.type
-        if ph.type == "testcard":
-            ph_desc += f" ({ph.timezone})"
-        elif ph.path:
+        if ph.path:
             ph_desc += f": <code>{os.path.basename(ph.path)}</code>"
         if ph.text:
             ph_desc += f"\n  text: <code>{ph.text}</code>"
+            if ph.x or ph.y:
+                ph_desc += f" at ({ph.x},{ph.y})"
         if ph.opacity < 1.0:
             ph_desc += f" opacity={ph.opacity:.2f}"
 
@@ -1044,12 +1084,12 @@ class TelegramBot:
     def _text_ph(self) -> str:
         ph = self.cfg.placeholder
         desc = f"<b>Placeholder:</b> {ph.type}"
-        if ph.type == "testcard":
-            desc += f" ({ph.timezone})"
         if ph.path:
             desc += f"\nFile: <code>{os.path.basename(ph.path)}</code>"
         if ph.text:
             desc += f"\nText overlay: <code>{ph.text}</code>"
+            if ph.x or ph.y:
+                desc += f" at ({ph.x},{ph.y})"
         desc += f"\nOpacity: {ph.opacity:.2f}"
         return desc
 
@@ -1150,6 +1190,9 @@ def _kb_ph(cfg: Config):
         [
             _btn(text_label, "ph:text"),
             _btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "ph:opacity"),
+        ],
+        [
+            _btn(f"\U0001f4cd Position ({ph.x},{ph.y})", "ph:pos"),
         ],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
     ]

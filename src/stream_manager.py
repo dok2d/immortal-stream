@@ -488,18 +488,11 @@ class StreamManager:
             except asyncio.TimeoutError:
                 old_proc.kill()
 
-        # Pass TZ env var so drawtext %{localtime} uses the configured timezone
-        env = os.environ.copy()
-        tz = self.cfg.placeholder.timezone
-        if tz:
-            env["TZ"] = tz
-
         log.info("Starting compositor [%s]: %s", label, " ".join(cmd))
         new_proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
-            env=env,
         )
         asyncio.create_task(
             _log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING)
@@ -693,11 +686,9 @@ async def _log_stderr(
         # Suppress noise that carries no diagnostic value:
         # - Non-monotonic DTS: tee muxer auto-corrects timestamps
         # - deprecated pixel format: harmless swscaler format conversion
-        # - %{localtime} requires: old compositor drawtext teardown
         if any(s in text for s in (
             "Non-monotonic DTS",
             "deprecated pixel format",
-            "%{localtime}",
             "Discarding interleaved",
             "Last message repeated",
             "non-existing PPS",
