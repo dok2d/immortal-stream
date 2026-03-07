@@ -465,13 +465,14 @@ class StreamManager:
         await self._replace_compositor(cmd, f"LIVE({info.path})")
 
     async def _replace_compositor(self, cmd: list, label: str) -> None:
-        """Stop old compositor, then start the new one.
+        """Stop old compositor, start the new one, restart output if needed.
 
         mediamtx does not handle two simultaneous RTMP publishers on the
         same path gracefully — the path resets during the switch, causing
         Broken pipe errors.  Stopping the old publisher first avoids this
-        race; the brief gap is acceptable because the watchdog restarts
-        the output if needed.
+        race.  The output FFmpeg usually dies when the RTSP source
+        disappears, so we proactively restart it after the grace period
+        instead of waiting for the watchdog (up to 5 s delay).
         """
         await self._terminate_process(self._compositor)
 
@@ -498,6 +499,13 @@ class StreamManager:
         await asyncio.sleep(COMPOSITOR_GRACE)
         log.info("Compositor switched to [%s]", label)
 
+        # The old compositor's termination kills the RTSP source, which
+        # causes the output FFmpeg to exit (code 0).  Restart it now
+        # instead of waiting up to 5 s for the watchdog.
+        if self._output is None or self._output.returncode is not None:
+            log.info("Output died during compositor swap — restarting")
+            await self._start_output()
+
     # ------------------------------------------------------------------ #
     #  Output FFmpeg (persistent)                                          #
     # ------------------------------------------------------------------ #
@@ -505,6 +513,10 @@ class StreamManager:
     async def _start_output(self) -> None:
         if not self.cfg.output.targets:
             log.info("No output targets configured — output FFmpeg not started")
+            return
+
+        # Guard: skip if output is already running (idempotent).
+        if self._output is not None and self._output.returncode is None:
             return
 
         relay_url = (
