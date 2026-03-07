@@ -91,7 +91,7 @@ class TelegramBot:
         }
         return await self._api("sendMessage", payload)
 
-    async def _download_file(self, file_id: str, dest_dir: str = "/media") -> str:
+    async def _download_file(self, file_id: str, dest_dir: str = "/tmp/tgbot_media") -> str:
         """Download a Telegram file by file_id and return the local path."""
         resp = await self._api("getFile", {"file_id": file_id})
         file_path = resp.get("result", {}).get("file_path", "")

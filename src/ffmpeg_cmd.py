@@ -145,11 +145,12 @@ def build_compositor_idle(cfg: Config) -> List[str]:
         cmd += _anullsrc(a.sample_rate)
 
         font = ph.font_path or DEFAULT_FONT
-        # %{localtime} renders the system clock; TZ env var set by
-        # stream_manager controls the timezone for the subprocess.
-        # Use single-quote wrapping so colons inside the time format
-        # are not treated as drawtext option separators.
-        time_text = r"text='%{localtime\:%H\:%M\:%S}'"
+        # Single quotes protect colons from drawtext option splitting.
+        # Inside quotes, use PLAIN colons — FFmpeg's text expansion
+        # engine looks for literal ':' to find the localtime argument,
+        # not '\:'.  The TZ env var (set by stream_manager) controls
+        # which timezone localtime reports.
+        time_text = "text='%{localtime:%H:%M:%S}'"
         opts = [
             f"fontfile={font}",
             time_text,
