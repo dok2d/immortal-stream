@@ -1,4 +1,5 @@
 """FFmpeg command builders for each streaming state."""
+import subprocess
 from typing import List
 
 from config import Config, VideoConfig
@@ -92,6 +93,19 @@ def _ffmpeg_base() -> List[str]:
 def _anullsrc(sample_rate: int) -> List[str]:
     """lavfi silence source input."""
     return ["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=stereo"]
+
+
+def _file_has_audio(path: str) -> bool:
+    """Quick ffprobe check for an audio stream in a local file."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "audio" in r.stdout
+    except Exception:
+        return False
 
 
 def _escape_tee_url(url: str) -> str:
@@ -204,8 +218,24 @@ def build_compositor_idle(cfg: Config) -> List[str]:
 
     elif ph.type == "video":
         cmd += ["-re", "-stream_loop", "-1", "-i", ph.path]
-        cmd += _anullsrc(a.sample_rate)
         filters.append(_scale_pad(v, "0:v", "vout"))
+
+        if _file_has_audio(ph.path):
+            # Use the video's native audio, resampled to output settings
+            filters.append(
+                f"[0:a]aresample={a.sample_rate},"
+                f"aformat=channel_layouts=stereo[aout]"
+            )
+            cmd += ["-filter_complex", ";".join(filters)]
+            cmd += ["-map", "[vout]", "-map", "[aout]"]
+        else:
+            cmd += _anullsrc(a.sample_rate)
+            cmd += ["-filter_complex", ";".join(filters)]
+            cmd += ["-map", "[vout]", "-map", "1:a"]
+
+        cmd += _encoding_flags(cfg)
+        cmd += ["-f", "flv", dest]
+        return cmd
 
     else:
         raise ValueError(f"Unknown placeholder.type: {ph.type!r}")
