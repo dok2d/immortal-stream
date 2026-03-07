@@ -102,6 +102,8 @@ def _gen_config_v1(cfg: Config) -> str:
         "pathDefaults:\n"
         "paths:\n"
         "  all_others:\n"
+        f"  {cfg.composite_path}:\n"
+        "    overridePublisher: true\n"
     )
 
 
@@ -127,6 +129,11 @@ def _gen_config_v0(cfg: Config) -> str:
         "\n"
         f"hlsEnabled: {hls_enabled}\n"
         "webRTCEnabled: no\n"
+        "\n"
+        "paths:\n"
+        "  all:\n"
+        f"  {cfg.composite_path}:\n"
+        "    overridePublisher: yes\n"
     )
 
 

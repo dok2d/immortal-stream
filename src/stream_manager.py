@@ -465,16 +465,23 @@ class StreamManager:
         await self._replace_compositor(cmd, f"LIVE({info.path})")
 
     async def _replace_compositor(self, cmd: list, label: str) -> None:
-        """Stop old compositor, start the new one, restart output if needed.
+        """Replace the running compositor with a new one.
 
-        mediamtx does not handle two simultaneous RTMP publishers on the
-        same path gracefully — the path resets during the switch, causing
-        Broken pipe errors.  Stopping the old publisher first avoids this
-        race.  The output FFmpeg usually dies when the RTSP source
-        disappears, so we proactively restart it after the grace period
-        instead of waiting for the watchdog (up to 5 s delay).
+        The internal mediamtx composite path has ``overridePublisher``
+        enabled, so the new compositor atomically replaces the old
+        publisher without breaking the RTSP session that the output
+        FFmpeg reads from.  This keeps the persistent RTMP connection
+        to YouTube / Twitch alive — no reconnection, no signal loss.
+
+        Sequence:
+          1. Start new compositor (publishes to the same RTMP path).
+          2. mediamtx accepts the new publisher and kicks the old one.
+          3. Wait COMPOSITOR_GRACE for the new compositor to push first
+             frames so RTSP readers see continuous data.
+          4. Terminate the old compositor process (usually already dead
+             because mediamtx disconnected it).
         """
-        await self._terminate_process(self._compositor)
+        old_proc = self._compositor
 
         # Pass TZ env var so drawtext %{localtime} uses the configured timezone
         env = os.environ.copy()
@@ -497,11 +504,15 @@ class StreamManager:
         # Wait for the new compositor to connect to mediamtx and push
         # first frames so the RTSP path is ready for the output FFmpeg.
         await asyncio.sleep(COMPOSITOR_GRACE)
+
+        # Clean up the old compositor.  mediamtx already kicked it when
+        # the new publisher connected (overridePublisher), so it may
+        # have exited on its own; _terminate_process handles both cases.
+        await self._terminate_process(old_proc)
         log.info("Compositor switched to [%s]", label)
 
-        # The old compositor's termination kills the RTSP source, which
-        # causes the output FFmpeg to exit (code 0).  Restart it now
-        # instead of waiting up to 5 s for the watchdog.
+        # Safety net: if the output somehow died during the swap,
+        # restart it (should not happen with overridePublisher).
         if self._output is None or self._output.returncode is not None:
             log.info("Output died during compositor swap — restarting")
             await self._start_output()
