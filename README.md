@@ -115,7 +115,7 @@ Can also be set via the `LOG_LEVEL` environment variable; the config file takes 
 
 ```yaml
 ingest:
-  port: 1935               # RTMP/RTSP ingest port
+  port: 1935               # RTMP ingest port
   srt_port: 8890           # SRT ingest port
   hls: false               # Enable HLS ingest (port 8888)
   hls_port: 8888           # HLS ingest port
@@ -220,7 +220,7 @@ Bot commands for runtime configuration:
 |---------|-------------|
 | `/menu` | Main menu with inline keyboard buttons |
 | `/status` | Current stream state and settings |
-| `/placeholder black\|testcard\|text\|image\|video\|opacity` | Change placeholder |
+| `/placeholder black\|testcard\|text\|image\|video\|opacity\|pos` | Change placeholder |
 | `/overlay off\|text\|image\|x\|y\|opacity\|size\|color` | Configure overlay |
 | `/target list\|add\|remove\|set` | Manage output RTMP targets |
 | `/output bitrate\|fps\|size\|preset` | Change output encoding |
