@@ -41,7 +41,7 @@ PROBE_TIMEOUT = 8.0       # seconds to wait for ffprobe
 COMPOSITOR_GRACE = 2.0    # seconds for new compositor to connect before killing old
 POLL_INTERVAL = 1.0       # seconds between mediamtx API polls
 OUTPUT_RETRY_LIMIT = 3    # max retries for output FFmpeg quick failures
-OUTPUT_QUICK_FAIL = 5.0   # seconds — if output exits faster than this, it's a quick fail
+OUTPUT_QUICK_FAIL = 15.0  # seconds — if output exits faster than this, it's a quick fail
 
 
 @dataclass
@@ -700,6 +700,9 @@ async def _log_stderr(
             "%{localtime}",
             "Discarding interleaved",
             "Last message repeated",
+            "non-existing PPS",
+            "decode_slice_header",
+            "no frame!",
         )) or "non monotone" in text.lower():
             continue
         log.log(

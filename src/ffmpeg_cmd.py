@@ -364,15 +364,17 @@ def build_output(cfg: Config) -> List[str]:
         raise ValueError("output.targets must not be empty")
 
     cmd = _ffmpeg_base() + [
-        "-fflags", "+genpts+discardcorrupt",
-        "-analyzeduration", "2000000",
-        "-probesize", "2000000",
-        "-use_wallclock_as_timestamps", "1",
+        "-fflags", "+genpts",
+        "-analyzeduration", "10000000",
+        "-probesize", "10000000",
         "-f", "mpegts",
         "-i", udp_url,
     ]
 
     cmd += ["-map", "0", "-c", "copy"]
+    # MPEG-TS uses codec tag 0x1B for H.264, FLV expects 0x07.
+    # Without this, the tee/flv muxer rejects the stream.
+    cmd += ["-tag:v", "7"]
     cmd += ["-avoid_negative_ts", "make_zero"]
 
     if len(targets) == 1:
