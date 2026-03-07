@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict
 
 from config import Config
-from ffmpeg_cmd import build_compositor_idle, build_compositor_live, build_output
+from ffmpeg_cmd import build_compositor_idle, build_compositor_live, build_output, file_has_audio
 
 log = logging.getLogger("stream_manager")
 
@@ -449,7 +449,13 @@ class StreamManager:
 
     async def _start_compositor_idle(self) -> None:
         try:
-            cmd = build_compositor_idle(self.cfg)
+            ph = self.cfg.placeholder
+            has_audio = (
+                await file_has_audio(ph.path)
+                if ph.type == "video" and ph.path
+                else False
+            )
+            cmd = build_compositor_idle(self.cfg, video_has_audio=has_audio)
         except Exception as e:
             log.error("Failed to build idle compositor command: %s", e)
             self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
@@ -584,12 +590,18 @@ class StreamManager:
             if compositor_crashed:
                 rc = self._compositor.returncode
                 log.warning("Compositor exited (code %d) — restarting", rc)
-                # With UDP transport, output stays alive — just restart
-                # the compositor and packets will resume.
-                if self._current_stream:
-                    await self._start_compositor_live(self._current_stream)
-                else:
-                    await self._start_compositor_idle()
+                # Lock prevents race with on_stream_start/stop and
+                # reload_compositor running concurrently.
+                async with self._lock:
+                    # Re-check after acquiring lock — another task may
+                    # have already restarted the compositor.
+                    if (self._compositor is not None
+                            and self._compositor.returncode is not None):
+                        if self._current_stream:
+                            await self._start_compositor_live(
+                                self._current_stream)
+                        else:
+                            await self._start_compositor_idle()
 
             if output_crashed:
                 rc = self._output.returncode if self._output else -1

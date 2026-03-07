@@ -1,5 +1,4 @@
 """FFmpeg command builders for each streaming state."""
-import subprocess
 from typing import List, Optional
 
 from config import Config, VideoConfig, PlaceholderConfig
@@ -153,15 +152,22 @@ def _anullsrc(sample_rate: int) -> List[str]:
     return ["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=stereo"]
 
 
-def _file_has_audio(path: str) -> bool:
-    """Quick ffprobe check for an audio stream in a local file."""
+async def file_has_audio(path: str) -> bool:
+    """Async ffprobe check for an audio stream in a local file."""
+    import asyncio
     try:
-        r = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-select_streams", "a",
-             "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
-            capture_output=True, text=True, timeout=5,
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "quiet", "-select_streams", "a",
+            "-show_entries", "stream=codec_type", "-of", "csv=p=0", path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        return "audio" in r.stdout
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return False
+        return b"audio" in (stdout or b"")
     except Exception:
         return False
 
@@ -210,13 +216,15 @@ def _placeholder_text_filter(
 #  Compositor: IDLE state
 # ---------------------------------------------------------------------------
 
-def build_compositor_idle(cfg: Config) -> List[str]:
+def build_compositor_idle(cfg: Config, video_has_audio: bool = False) -> List[str]:
     """Compositor command for IDLE state (no incoming stream).
 
     Outputs placeholder to the internal UDP/MPEG-TS destination.
 
     Text is additive: if placeholder.text is set, it is drawn on top
     of whatever base type is active (black, testcard, image, video).
+
+    video_has_audio: pre-probed result for placeholder video files.
     """
     v = cfg.output.video
     a = cfg.output.audio
@@ -262,7 +270,7 @@ def build_compositor_idle(cfg: Config) -> List[str]:
         cmd += ["-re", "-stream_loop", "-1", "-i", ph.path]
         filters.append(_scale_pad(v, "0:v", "vbase"))
 
-        if _file_has_audio(ph.path):
+        if video_has_audio:
             filters.append(
                 f"[0:a]aresample={a.sample_rate},"
                 f"aformat=channel_layouts=stereo[aout]"
