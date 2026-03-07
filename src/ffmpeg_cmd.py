@@ -372,9 +372,11 @@ def build_output(cfg: Config) -> List[str]:
     ]
 
     cmd += ["-map", "0", "-c", "copy"]
-    # MPEG-TS uses codec tag 0x1B for H.264, FLV expects 0x07.
-    # Without this, the tee/flv muxer rejects the stream.
-    cmd += ["-tag:v", "7"]
+    # MPEG-TS codec tags differ from FLV:
+    #   H.264 video: MPEG-TS=0x1B(27), FLV=0x07(7)
+    #   AAC audio:   MPEG-TS=0x0F(15), FLV=0x0A(10)
+    # Without explicit remapping, the flv muxer rejects the stream.
+    cmd += ["-tag:v", "7", "-tag:a", "10"]
     cmd += ["-avoid_negative_ts", "make_zero"]
 
     if len(targets) == 1:
