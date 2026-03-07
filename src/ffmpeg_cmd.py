@@ -137,7 +137,37 @@ def build_compositor_idle(cfg: Config) -> List[str]:
         cmd += ["-f", "flv", dest]
         return cmd
 
-    if ph.type == "text":
+    if ph.type == "testcard":
+        cmd += [
+            "-f", "lavfi", "-i",
+            f"testsrc2=s={v.width}x{v.height}:r={v.fps}:sar=1/1",
+        ]
+        cmd += _anullsrc(a.sample_rate)
+
+        font = ph.font_path or DEFAULT_FONT
+        # Two escaping levels in -filter_complex:
+        #   1. Filter graph parser: \\  →  \   (strips one backslash)
+        #   2. Option parser:       \:  →  :   (escaped colon, not separator)
+        # So \\: in the string becomes \: after level 1, then : after level 2.
+        # Single quotes do NOT work here — the filter graph parser strips them,
+        # leaving colons unprotected for the option parser.
+        time_text = "text=%{localtime\\\\:%H\\\\:%M\\\\:%S}"
+        opts = [
+            f"fontfile={font}",
+            time_text,
+            "fontsize=96",
+            "fontcolor=white",
+            "borderw=4",
+            "bordercolor=black@0.8",
+            "x=(w-text_w)/2",
+            "y=h-text_h-60",
+            "box=1",
+            "boxcolor=black@0.5",
+            "boxborderw=12",
+        ]
+        filters.append(f"[0:v]drawtext={':'.join(opts)}[vout]")
+
+    elif ph.type == "text":
         cmd += [
             "-f", "lavfi", "-i",
             f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
@@ -149,7 +179,7 @@ def build_compositor_idle(cfg: Config) -> List[str]:
         x_expr = str(ph.x) if ph.x else "(w-text_w)/2"
         y_expr = str(ph.y) if ph.y else "(h-text_h)/2"
         opts = [
-            f"fontfile='{font}'",
+            f"fontfile={font}",
             f"text={escaped}",
             f"x={x_expr}",
             f"y={y_expr}",
@@ -236,7 +266,7 @@ def build_compositor_live(
             escaped = _escape_drawtext(ov.text)
             font = ov.font_path or DEFAULT_FONT
             opts = [
-                f"fontfile='{font}'",
+                f"fontfile={font}",
                 f"text={escaped}",
                 f"x={ov.x}",
                 f"y={ov.y}",

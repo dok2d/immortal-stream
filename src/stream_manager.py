@@ -22,6 +22,7 @@ Redundancy:
 import asyncio
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.request
@@ -74,6 +75,11 @@ class StreamManager:
     #  Lifecycle                                                           #
     # ------------------------------------------------------------------ #
 
+    @property
+    def is_paused(self) -> bool:
+        """True when all processes have been stopped via pause_all()."""
+        return not self._running
+
     async def start(self) -> None:
         self._running = True
         log.info("Starting compositor in IDLE mode")
@@ -92,6 +98,31 @@ class StreamManager:
                     await asyncio.wait_for(proc.wait(), timeout=5)
                 except asyncio.TimeoutError:
                     proc.kill()
+
+    async def pause_all(self) -> None:
+        """Stop compositor & output, pause polling and watchdog.
+
+        The service enters a fully stopped state.  Use resume_all() to
+        restart everything.
+        """
+        self._running = False
+        await self._terminate_process(self._output)
+        self._output = None
+        await self._terminate_process(self._compositor)
+        self._compositor = None
+        log.info("All processes paused")
+
+    async def resume_all(self) -> None:
+        """Restart compositor, output, polling and watchdog."""
+        self._running = True
+        if self._current_stream:
+            await self._start_compositor_live(self._current_stream)
+        else:
+            await self._start_compositor_idle()
+        await self._start_output()
+        asyncio.create_task(self._poll_loop())
+        asyncio.create_task(self._watchdog())
+        log.info("All processes resumed")
 
     # ------------------------------------------------------------------ #
     #  mediamtx API polling — stream detection                            #
@@ -434,21 +465,29 @@ class StreamManager:
         await self._replace_compositor(cmd, f"LIVE({info.path})")
 
     async def _replace_compositor(self, cmd: list, label: str) -> None:
-        """Stop old compositor, then start the new one.
+        """Stop old compositor, start the new one, restart output if needed.
 
         mediamtx does not handle two simultaneous RTMP publishers on the
         same path gracefully — the path resets during the switch, causing
         Broken pipe errors.  Stopping the old publisher first avoids this
-        race; the brief gap is acceptable because the watchdog restarts
-        the output if needed.
+        race.  The output FFmpeg usually dies when the RTSP source
+        disappears, so we proactively restart it after the grace period
+        instead of waiting for the watchdog (up to 5 s delay).
         """
         await self._terminate_process(self._compositor)
+
+        # Pass TZ env var so drawtext %{localtime} uses the configured timezone
+        env = os.environ.copy()
+        tz = self.cfg.placeholder.timezone
+        if tz:
+            env["TZ"] = tz
 
         log.info("Starting compositor [%s]: %s", label, " ".join(cmd))
         new_proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         asyncio.create_task(
             _log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING)
@@ -460,6 +499,13 @@ class StreamManager:
         await asyncio.sleep(COMPOSITOR_GRACE)
         log.info("Compositor switched to [%s]", label)
 
+        # The old compositor's termination kills the RTSP source, which
+        # causes the output FFmpeg to exit (code 0).  Restart it now
+        # instead of waiting up to 5 s for the watchdog.
+        if self._output is None or self._output.returncode is not None:
+            log.info("Output died during compositor swap — restarting")
+            await self._start_output()
+
     # ------------------------------------------------------------------ #
     #  Output FFmpeg (persistent)                                          #
     # ------------------------------------------------------------------ #
@@ -467,6 +513,10 @@ class StreamManager:
     async def _start_output(self) -> None:
         if not self.cfg.output.targets:
             log.info("No output targets configured — output FFmpeg not started")
+            return
+
+        # Guard: skip if output is already running (idempotent).
+        if self._output is not None and self._output.returncode is None:
             return
 
         relay_url = (
@@ -662,11 +712,17 @@ async def _log_stderr(
         line = await proc.stderr.readline()
         if not line:
             break
+        text = line.decode(errors="replace").rstrip()
+        # Downgrade noisy DTS discontinuity warnings to DEBUG —
+        # these are expected after compositor restarts and auto-corrected.
+        effective_level = level
+        if "Non-monotonic DTS" in text or "non monotone" in text.lower():
+            effective_level = logging.DEBUG
         log.log(
-            level,
+            effective_level,
             "[ffmpeg/%s] %s",
             label,
-            line.decode(errors="replace").rstrip(),
+            text,
         )
 
 
