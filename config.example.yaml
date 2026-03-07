@@ -137,7 +137,8 @@ output:
     fps: 30
     bitrate: 6000k       # target video bitrate
     preset: ultrafast    # FFmpeg x264 preset (ultrafast…veryslow); keep ultrafast for low CPU
-    gop: 60              # keyframe interval in frames (= fps × 2 seconds recommended)
+    tune: zerolatency    # x264 tune (zerolatency, film, animation, grain, stillimage, fastdecode)
+    gop: 60              # keyframe interval in frames (= fps × 2 seconds recommended; must be >= fps)
 
   audio:
     bitrate: 128k

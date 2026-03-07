@@ -195,7 +195,8 @@ output:
     fps: 30
     bitrate: 6000k
     preset: ultrafast      # x264 preset; ultrafast = lowest CPU
-    gop: 60
+    tune: zerolatency      # x264 tune (zerolatency|film|animation|grain|...)
+    gop: 60                # must be >= fps (minimum 1s keyframe interval)
   audio:
     bitrate: 128k
     sample_rate: 44100

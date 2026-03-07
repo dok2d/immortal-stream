@@ -117,7 +117,7 @@ def _encoding_flags(cfg: Config) -> List[str]:
     return [
         "-c:v", "libx264",
         "-preset", v.preset,
-        "-tune", "zerolatency",
+        "-tune", v.tune,
         "-g", str(v.gop),
         "-keyint_min", str(v.gop),
         "-sc_threshold", "0",

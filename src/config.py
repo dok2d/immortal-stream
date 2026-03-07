@@ -16,6 +16,10 @@ _X264_PRESETS = {
     "ultrafast", "superfast", "veryfast", "faster", "fast",
     "medium", "slow", "slower", "veryslow",
 }
+_X264_TUNES = {
+    "film", "animation", "grain", "stillimage",
+    "fastdecode", "zerolatency",
+}
 
 
 @dataclass
@@ -63,6 +67,7 @@ class VideoConfig:
     fps: int = 30
     bitrate: str = "6000k"
     preset: str = "ultrafast"
+    tune: str = "zerolatency"
     gop: int = 60
 
 
@@ -146,11 +151,21 @@ def _validate(cfg: Config) -> None:
             f"output.video.preset must be one of {sorted(_X264_PRESETS)}, "
             f"got {v.preset!r}"
         )
+    if v.tune not in _X264_TUNES:
+        raise ValueError(
+            f"output.video.tune must be one of {sorted(_X264_TUNES)}, "
+            f"got {v.tune!r}"
+        )
     if not 1 <= v.fps <= 120:
         raise ValueError(f"output.video.fps must be 1–120, got {v.fps}")
     if not (160 <= v.width <= 7680 and 90 <= v.height <= 4320):
         raise ValueError(
             f"output.video size out of range: {v.width}x{v.height}"
+        )
+    if v.gop < v.fps:
+        raise ValueError(
+            f"output.video.gop ({v.gop}) must be >= fps ({v.fps}); "
+            f"minimum keyframe interval is 1 second"
         )
 
     if cfg.log_level not in _VALID_LOG_LEVELS:
