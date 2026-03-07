@@ -30,7 +30,7 @@ RUN mkdir -p /usr/share/fonts/jetbrains-mono \
     && fc-cache -f
 
 # ── mediamtx (single Go binary, minimal footprint) ────────────────────────────
-ARG MEDIAMTX_VERSION=v1.16.1
+ARG MEDIAMTX_VERSION=v1.16.3
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 RUN curl -fsSL \

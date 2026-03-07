@@ -1,7 +1,8 @@
 """FFmpeg command builders for each streaming state."""
-from typing import List
+import subprocess
+from typing import List, Optional
 
-from config import Config, VideoConfig
+from config import Config, VideoConfig, PlaceholderConfig
 
 # Default font for drawtext when no font_path is configured.
 DEFAULT_FONT = "/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
@@ -32,6 +33,63 @@ def _scale_pad(v: VideoConfig, src_label: str, dst_label: str) -> str:
         f"pad={v.width}:{v.height}:(ow-iw)/2:(oh-ih)/2,"
         f"setsar=1[{dst_label}]"
     )
+
+
+_NAMED_COLORS_LIGHT = {
+    "white", "yellow", "cyan", "lime", "aqua", "lightyellow", "lightyellow",
+    "lightcyan", "lightgreen", "ivory", "snow", "seashell", "mintcream",
+    "azure", "ghostwhite", "floralwhite", "honeydew", "lemonchiffon",
+    "cornsilk", "beige", "linen", "oldlace", "lavenderblush", "mistyrose",
+    "papayawhip", "blanchedalmond", "bisque", "moccasin", "navajowhite",
+    "peachpuff", "wheat", "antiquewhite", "lavender", "thistle", "pink",
+    "lightpink", "lightsalmon", "lightskyblue", "lightsteelblue",
+    "lightblue", "lightcoral", "palegreen", "palegoldenrod", "paleturquoise",
+    "palevioletred", "powderblue", "khaki", "gold", "orange", "plum",
+    "silver", "gainsboro", "lightgray", "lightgrey",
+}
+
+_NAMED_COLORS_DARK = {
+    "black", "darkblue", "darkred", "darkgreen", "darkmagenta", "darkcyan",
+    "darkviolet", "darkolivegreen", "darkslategray", "darkslategrey",
+    "darkslateblue", "midnightblue", "navy", "maroon", "indigo", "brown",
+    "saddlebrown", "sienna", "dimgray", "dimgrey",
+}
+
+
+def _is_light_color(color: str) -> bool:
+    """Determine if a color name or hex value is 'light' (high luminance).
+
+    Uses simple heuristics: named-color lookup, then hex-value luminance.
+    Falls back to True (assume light) for unknown names.
+    """
+    c = color.lower().strip()
+    if c in _NAMED_COLORS_LIGHT:
+        return True
+    if c in _NAMED_COLORS_DARK:
+        return False
+    # Try hex parsing: #RGB, #RRGGBB, 0xRRGGBB
+    hex_str = c.lstrip("#").lstrip("0x")
+    try:
+        if len(hex_str) == 3:
+            r, g, b = (int(h * 2, 16) for h in hex_str)
+        elif len(hex_str) == 6:
+            r = int(hex_str[0:2], 16)
+            g = int(hex_str[2:4], 16)
+            b = int(hex_str[4:6], 16)
+        else:
+            return True  # unknown → assume light
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        return lum > 128
+    except (ValueError, TypeError):
+        return True  # unknown → assume light
+
+
+def _border_opts(font_color: str) -> list:
+    """Return drawtext border options: thin outline in contrasting color."""
+    if _is_light_color(font_color):
+        return ["borderw=2", "bordercolor=black"]
+    else:
+        return ["borderw=2", "bordercolor=white"]
 
 
 def _escape_drawtext(text: str) -> str:
@@ -76,12 +134,13 @@ def _encoding_flags(cfg: Config) -> List[str]:
 
 
 def _composite_dest(cfg: Config) -> str:
-    """RTMP URL the compositor pushes to (internal mediamtx path).
+    """UDP/MPEG-TS URL the compositor pushes to.
 
-    Uses a per-run secret path name instead of auth credentials,
-    avoiding mediamtx publishUser/publishPass field compatibility issues.
+    UDP is connectionless — the output FFmpeg can start listening before
+    or after the compositor, and compositor restarts do NOT break the
+    output FFmpeg process.  This is the key to uninterrupted streaming.
     """
-    return f"rtmp://127.0.0.1:{cfg.internal_rtmp_port}/{cfg.composite_path}"
+    return f"udp://127.0.0.1:{cfg.internal_udp_port}?pkt_size=1316"
 
 
 def _ffmpeg_base() -> List[str]:
@@ -92,6 +151,19 @@ def _ffmpeg_base() -> List[str]:
 def _anullsrc(sample_rate: int) -> List[str]:
     """lavfi silence source input."""
     return ["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=stereo"]
+
+
+def _file_has_audio(path: str) -> bool:
+    """Quick ffprobe check for an audio stream in a local file."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "audio" in r.stdout
+    except Exception:
+        return False
 
 
 def _escape_tee_url(url: str) -> str:
@@ -108,6 +180,32 @@ def _escape_tee_url(url: str) -> str:
     )
 
 
+def _placeholder_text_filter(
+    ph: PlaceholderConfig, src_label: str, dst_label: str,
+) -> Optional[str]:
+    """Build a drawtext filter for placeholder text overlay.
+
+    Text is additive — it overlays on top of whatever base type is
+    active (black, testcard, image, video).  Returns None if no text
+    is configured.
+    """
+    if not ph.text:
+        return None
+    escaped = _escape_drawtext(ph.text)
+    font = ph.font_path or DEFAULT_FONT
+    x_expr = str(ph.x) if ph.x is not None and ph.x != 0 else "(w-text_w)/2"
+    y_expr = str(ph.y) if ph.y is not None and ph.y != 0 else "(h-text_h)/2"
+    opts = [
+        f"fontfile={font}",
+        f"text={escaped}",
+        f"x={x_expr}",
+        f"y={y_expr}",
+        f"fontsize={ph.font_size}",
+        f"fontcolor={ph.font_color}@{ph.opacity:.3f}",
+    ] + _border_opts(ph.font_color)
+    return f"[{src_label}]drawtext={':'.join(opts)}[{dst_label}]"
+
+
 # ---------------------------------------------------------------------------
 #  Compositor: IDLE state
 # ---------------------------------------------------------------------------
@@ -115,8 +213,10 @@ def _escape_tee_url(url: str) -> str:
 def build_compositor_idle(cfg: Config) -> List[str]:
     """Compositor command for IDLE state (no incoming stream).
 
-    Outputs placeholder (black / image / video / text) to the internal
-    composite path.
+    Outputs placeholder to the internal UDP/MPEG-TS destination.
+
+    Text is additive: if placeholder.text is set, it is drawn on top
+    of whatever base type is active (black, testcard, image, video).
     """
     v = cfg.output.video
     a = cfg.output.audio
@@ -125,70 +225,26 @@ def build_compositor_idle(cfg: Config) -> List[str]:
 
     cmd = _ffmpeg_base()
     filters: List[str] = []
+    # Track the current video label through the filter chain
+    last_v = "vbase"
+    audio_input_idx = 1   # index of anullsrc input (when used)
 
+    # ── Base type ─────────────────────────────────────────────────────
     if ph.type == "black":
         cmd += [
-            "-f", "lavfi", "-i",
+            "-re", "-f", "lavfi", "-i",
             f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
         ]
         cmd += _anullsrc(a.sample_rate)
-        cmd += ["-map", "0:v", "-map", "1:a"]
-        cmd += _encoding_flags(cfg)
-        cmd += ["-f", "flv", dest]
-        return cmd
+        filters.append("[0:v]copy[vbase]")
 
-    if ph.type == "testcard":
+    elif ph.type == "testcard":
         cmd += [
-            "-f", "lavfi", "-i",
+            "-re", "-f", "lavfi", "-i",
             f"testsrc2=s={v.width}x{v.height}:r={v.fps}:sar=1/1",
         ]
         cmd += _anullsrc(a.sample_rate)
-
-        font = ph.font_path or DEFAULT_FONT
-        # Two escaping levels in -filter_complex:
-        #   1. Filter graph parser: \\  →  \   (strips one backslash)
-        #   2. Option parser:       \:  →  :   (escaped colon, not separator)
-        # So \\: in the string becomes \: after level 1, then : after level 2.
-        # Single quotes do NOT work here — the filter graph parser strips them,
-        # leaving colons unprotected for the option parser.
-        time_text = "text=%{localtime\\\\:%H\\\\:%M\\\\:%S}"
-        opts = [
-            f"fontfile={font}",
-            time_text,
-            "fontsize=96",
-            "fontcolor=white",
-            "borderw=4",
-            "bordercolor=black@0.8",
-            "x=(w-text_w)/2",
-            "y=h-text_h-60",
-            "box=1",
-            "boxcolor=black@0.5",
-            "boxborderw=12",
-        ]
-        filters.append(f"[0:v]drawtext={':'.join(opts)}[vout]")
-
-    elif ph.type == "text":
-        cmd += [
-            "-f", "lavfi", "-i",
-            f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
-        ]
-        cmd += _anullsrc(a.sample_rate)
-
-        escaped = _escape_drawtext(ph.text)
-        font = ph.font_path or DEFAULT_FONT
-        x_expr = str(ph.x) if ph.x else "(w-text_w)/2"
-        y_expr = str(ph.y) if ph.y else "(h-text_h)/2"
-        opts = [
-            f"fontfile={font}",
-            f"text={escaped}",
-            f"x={x_expr}",
-            f"y={y_expr}",
-            f"fontsize={ph.font_size}",
-            f"fontcolor={ph.font_color}@{ph.opacity:.3f}",
-            "borderw=2",
-            "bordercolor=white",
-        ]
-        filters.append(f"[0:v]drawtext={':'.join(opts)}[vout]")
+        filters.append("[0:v]copy[vbase]")
 
     elif ph.type == "image":
         cmd += ["-re", "-loop", "1", "-i", ph.path]
@@ -197,23 +253,49 @@ def build_compositor_idle(cfg: Config) -> List[str]:
         if ph.opacity < 1.0:
             filters.append(
                 f"[vscaled]format=rgba,"
-                f"colorchannelmixer=aa={ph.opacity:.3f}[vout]"
+                f"colorchannelmixer=aa={ph.opacity:.3f}[vbase]"
             )
         else:
-            filters.append("[vscaled]copy[vout]")
+            filters.append("[vscaled]copy[vbase]")
 
     elif ph.type == "video":
         cmd += ["-re", "-stream_loop", "-1", "-i", ph.path]
-        cmd += _anullsrc(a.sample_rate)
-        filters.append(_scale_pad(v, "0:v", "vout"))
+        filters.append(_scale_pad(v, "0:v", "vbase"))
+
+        if _file_has_audio(ph.path):
+            filters.append(
+                f"[0:a]aresample={a.sample_rate},"
+                f"aformat=channel_layouts=stereo[aout]"
+            )
+            # Add text overlay if configured
+            text_f = _placeholder_text_filter(ph, last_v, "vout")
+            if text_f:
+                filters.append(text_f)
+            else:
+                filters.append(f"[{last_v}]copy[vout]")
+            cmd += ["-filter_complex", ";".join(filters)]
+            cmd += ["-map", "[vout]", "-map", "[aout]"]
+            cmd += _encoding_flags(cfg)
+            cmd += ["-f", "mpegts", dest]
+            return cmd
+        else:
+            cmd += _anullsrc(a.sample_rate)
+            audio_input_idx = 1
 
     else:
         raise ValueError(f"Unknown placeholder.type: {ph.type!r}")
 
+    # ── Additive text overlay on base ─────────────────────────────────
+    text_f = _placeholder_text_filter(ph, last_v, "vout")
+    if text_f:
+        filters.append(text_f)
+    else:
+        filters.append(f"[{last_v}]copy[vout]")
+
     cmd += ["-filter_complex", ";".join(filters)]
-    cmd += ["-map", "[vout]", "-map", "1:a"]
+    cmd += ["-map", "[vout]", "-map", f"{audio_input_idx}:a"]
     cmd += _encoding_flags(cfg)
-    cmd += ["-f", "flv", dest]
+    cmd += ["-f", "mpegts", dest]
     return cmd
 
 
@@ -229,7 +311,7 @@ def build_compositor_live(
     """Compositor command for LIVE state.
 
     Reads incoming stream from mediamtx (RTSP), applies optional overlay,
-    and outputs to the internal composite path.
+    and outputs to the internal UDP/MPEG-TS destination.
     """
     v = cfg.output.video
     a = cfg.output.audio
@@ -272,9 +354,7 @@ def build_compositor_live(
                 f"y={ov.y}",
                 f"fontsize={ov.font_size}",
                 f"fontcolor={ov.font_color}@{ov.opacity:.3f}",
-                "borderw=2",
-                "bordercolor=white",
-            ]
+            ] + _border_opts(ov.font_color)
             filters.append(
                 f"[{last_v}]drawtext={':'.join(opts)}[vwith_text]"
             )
@@ -298,7 +378,7 @@ def build_compositor_live(
     cmd += ["-filter_complex", ";".join(filters)]
     cmd += ["-map", "[vout]", "-map", "[aout]"]
     cmd += _encoding_flags(cfg)
-    cmd += ["-f", "flv", dest]
+    cmd += ["-f", "mpegts", dest]
     return cmd
 
 
@@ -307,18 +387,19 @@ def build_compositor_live(
 # ---------------------------------------------------------------------------
 
 def build_output(cfg: Config) -> List[str]:
-    """Output FFmpeg — reads the compositor output from mediamtx (RTSP),
+    """Output FFmpeg — reads the compositor output from UDP/MPEG-TS,
     writes to all configured RTMP targets.
 
     This process NEVER restarts during normal operation; it holds the
     persistent RTMP connection to the target services.
 
-    Brief interruptions during compositor restarts (< 2 s) are absorbed
-    by the internal RTSP relay.  If the compositor crashes, the watchdog
-    restarts both processes.
+    UDP is connectionless: compositor restarts cause a brief pause in
+    incoming packets, but the output FFmpeg keeps running and resumes
+    forwarding automatically when the new compositor starts sending.
     """
-    relay_url = (
-        f"rtsp://127.0.0.1:{cfg.internal_rtsp_port}/{cfg.composite_path}"
+    udp_url = (
+        f"udp://127.0.0.1:{cfg.internal_udp_port}"
+        f"?fifo_size=5000000&overrun_nonfatal=1"
     )
     targets = cfg.output.targets
 
@@ -326,17 +407,20 @@ def build_output(cfg: Config) -> List[str]:
         raise ValueError("output.targets must not be empty")
 
     cmd = _ffmpeg_base() + [
-        "-rtsp_transport", "tcp",
-        "-analyzeduration", "5000000",
-        "-probesize", "5000000",
-        "-use_wallclock_as_timestamps", "1",
-        "-i", relay_url,
+        "-fflags", "+genpts",
+        "-analyzeduration", "10000000",
+        "-probesize", "10000000",
+        "-f", "mpegts",
+        "-i", udp_url,
     ]
 
-    # Explicit -map 0 ensures all streams from the RTSP source are
-    # forwarded.  Without it the tee muxer may report "Output file does
-    # not contain any stream" when auto-selection fails.
     cmd += ["-map", "0", "-c", "copy"]
+    # MPEG-TS codec tags differ from FLV:
+    #   H.264 video: MPEG-TS=0x1B(27), FLV=0x07(7)
+    #   AAC audio:   MPEG-TS=0x0F(15), FLV=0x0A(10)
+    # Without explicit remapping, the flv muxer rejects the stream.
+    cmd += ["-tag:v", "7", "-tag:a", "10"]
+    cmd += ["-avoid_negative_ts", "make_zero"]
 
     if len(targets) == 1:
         cmd += ["-f", "flv", targets[0]]

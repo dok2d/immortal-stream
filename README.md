@@ -34,13 +34,13 @@ Fault-tolerant live streaming relay with 3-layer compositing, designed to keep t
 
 | Priority | Layer | Visibility |
 |----------|-------|-----------|
-| Base | **Placeholder** | Always sent to the target service. Shown as-is when no incoming stream is active. Keeps the broadcast alive. Can be: black screen, text, image, or looping video. |
+| Base | **Placeholder** | Always sent to the target service. Shown as-is when no incoming stream is active. Keeps the broadcast alive. Can be: black screen, testcard (colour bars + clock), text, image, or looping video. |
 | Middle | **Incoming stream** | Any protocol and codec accepted (RTMP, RTSP, SRT, HLS). Replaces the placeholder while active. |
 | Top | **Overlay** | Image or text composited over the incoming stream. Shown **only** when a stream is active. |
 
 ### Continuous output guarantee
 
-The output FFmpeg process connects to the target service once at startup and **never disconnects**. A persistent internal relay (mediamtx) buffers the compositor output, so brief compositor restarts (< 1 s) during stream switching are invisible to the target service.
+The output FFmpeg process connects to the target service once at startup and **never disconnects**. A persistent internal relay (mediamtx) buffers the compositor output, so brief compositor restarts (< 2 s) during stream switching are invisible to the target service.
 
 ### Redundant input sources
 
@@ -141,7 +141,8 @@ Leave `redundant_sources` empty (default) to accept any single stream on `/live/
 
 ```yaml
 placeholder:
-  type: black              # black | text | image | video
+  type: testcard           # black | testcard | text | image | video
+  timezone: UTC            # IANA tz name for testcard clock (e.g. Europe/Moscow)
   # Text placeholder:
   # text: "Stream starting soon"
   # font_path: /media/fonts/DejaVuSans.ttf
@@ -154,7 +155,7 @@ placeholder:
   opacity: 1.0
 ```
 
-The placeholder is re-encoded to the configured output resolution. Images are padded with black bars to maintain aspect ratio. Videos loop seamlessly.
+The placeholder is re-encoded to the configured output resolution. `testcard` shows colour bars with a live clock overlay. Images are padded with black bars to maintain aspect ratio. Videos loop seamlessly.
 
 ### `overlay`
 
@@ -211,7 +212,7 @@ Bot commands for runtime configuration:
 | Command | Description |
 |---------|-------------|
 | `/status` | Current stream state and settings |
-| `/placeholder black\|text\|image\|video\|opacity` | Change placeholder |
+| `/placeholder black\|testcard\|text\|image\|video\|opacity\|timezone` | Change placeholder |
 | `/overlay off\|text\|image\|x\|y\|opacity\|size\|color` | Configure overlay |
 | `/target list\|add\|remove\|set` | Manage output RTMP targets |
 | `/output bitrate\|fps\|size\|preset` | Change output encoding |

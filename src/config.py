@@ -9,7 +9,7 @@ import yaml
 
 log = logging.getLogger("config")
 
-_VALID_PLACEHOLDER_TYPES = {"black", "text", "image", "video", "testcard"}
+_VALID_PLACEHOLDER_TYPES = {"black", "image", "video", "testcard"}
 _VALID_OVERLAY_TYPES = {"image", "text"}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _X264_PRESETS = {
@@ -29,7 +29,6 @@ class PlaceholderConfig:
     x: int = 0
     y: int = 0
     opacity: float = 1.0
-    timezone: str = "UTC"
 
 
 @dataclass
@@ -99,6 +98,7 @@ class Config:
     internal_rtsp_port: int = 8554
     internal_rtmp_port: int = 1935
     mediamtx_api_port: int = 9997
+    internal_udp_port: int = 5111
     composite_path: str = field(default_factory=lambda: f"_c{secrets.token_hex(8)}")
 
 
@@ -123,8 +123,6 @@ def _validate(cfg: Config) -> None:
         )
     if ph.type in ("image", "video") and not ph.path:
         raise ValueError(f"placeholder.path is required for type={ph.type!r}")
-    if ph.type == "text" and not ph.text:
-        raise ValueError("placeholder.text is required for type='text'")
     if not 0.0 <= ph.opacity <= 1.0:
         raise ValueError(f"placeholder.opacity must be 0.0–1.0, got {ph.opacity}")
 

@@ -9,9 +9,12 @@ Architecture:
                          | API poll (every 1 s)
                     StreamManager
                          | manages
-                    Compositor FFmpeg -> mediamtx /composite
-                                              | internal relay
-                                        Output FFmpeg -> target services
+                    Compositor FFmpeg --UDP/MPEG-TS--> Output FFmpeg -> targets
+
+  The compositor→output link uses UDP/MPEG-TS (connectionless).
+  Compositor restarts cause a brief pause (~1 s) in the UDP stream,
+  but the output FFmpeg keeps running — no reconnection, no signal
+  loss on YouTube/Twitch/Telegram.
 
 Redundancy:
   Multiple input sources can be configured with priority ordering.
@@ -38,7 +41,7 @@ PROBE_TIMEOUT = 8.0       # seconds to wait for ffprobe
 COMPOSITOR_GRACE = 2.0    # seconds for new compositor to connect before killing old
 POLL_INTERVAL = 1.0       # seconds between mediamtx API polls
 OUTPUT_RETRY_LIMIT = 3    # max retries for output FFmpeg quick failures
-OUTPUT_QUICK_FAIL = 5.0   # seconds — if output exits faster than this, it's a quick fail
+OUTPUT_QUICK_FAIL = 15.0  # seconds — if output exits faster than this, it's a quick fail
 
 
 @dataclass
@@ -437,9 +440,7 @@ class StreamManager:
     async def reload_output(self) -> None:
         """Restart output FFmpeg (targets changed). Briefly interrupts connection."""
         await self._terminate_process(self._output)
-        # Brief delay for mediamtx to stabilize the RTSP path after the
-        # old reader disconnects, preventing "no streams" errors.
-        await asyncio.sleep(1)
+        self._output = None
         await self._start_output()
 
     # ------------------------------------------------------------------ #
@@ -465,46 +466,39 @@ class StreamManager:
         await self._replace_compositor(cmd, f"LIVE({info.path})")
 
     async def _replace_compositor(self, cmd: list, label: str) -> None:
-        """Stop old compositor, start the new one, restart output if needed.
+        """Replace the running compositor with a new one.
 
-        mediamtx does not handle two simultaneous RTMP publishers on the
-        same path gracefully — the path resets during the switch, causing
-        Broken pipe errors.  Stopping the old publisher first avoids this
-        race.  The output FFmpeg usually dies when the RTSP source
-        disappears, so we proactively restart it after the grace period
-        instead of waiting for the watchdog (up to 5 s delay).
+        The compositor→output link uses UDP/MPEG-TS which is
+        connectionless.  The output FFmpeg simply pauses when no
+        packets arrive, then resumes when the new compositor starts
+        sending.  No output restart is needed.
+
+        Sequence:
+          1. Kill old compositor quickly (SIGTERM, 1 s timeout, SIGKILL).
+          2. Start new compositor.
+          3. Output FFmpeg sees a brief gap, then gets new packets.
         """
-        await self._terminate_process(self._compositor)
+        old_proc = self._compositor
 
-        # Pass TZ env var so drawtext %{localtime} uses the configured timezone
-        env = os.environ.copy()
-        tz = self.cfg.placeholder.timezone
-        if tz:
-            env["TZ"] = tz
+        # Kill old compositor fast to minimize the gap
+        if old_proc and old_proc.returncode is None:
+            old_proc.terminate()
+            try:
+                await asyncio.wait_for(old_proc.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                old_proc.kill()
 
         log.info("Starting compositor [%s]: %s", label, " ".join(cmd))
         new_proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
-            env=env,
         )
         asyncio.create_task(
             _log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING)
         )
         self._compositor = new_proc
-
-        # Wait for the new compositor to connect to mediamtx and push
-        # first frames so the RTSP path is ready for the output FFmpeg.
-        await asyncio.sleep(COMPOSITOR_GRACE)
         log.info("Compositor switched to [%s]", label)
-
-        # The old compositor's termination kills the RTSP source, which
-        # causes the output FFmpeg to exit (code 0).  Restart it now
-        # instead of waiting up to 5 s for the watchdog.
-        if self._output is None or self._output.returncode is not None:
-            log.info("Output died during compositor swap — restarting")
-            await self._start_output()
 
     # ------------------------------------------------------------------ #
     #  Output FFmpeg (persistent)                                          #
@@ -519,11 +513,6 @@ class StreamManager:
         if self._output is not None and self._output.returncode is None:
             return
 
-        relay_url = (
-            f"rtsp://127.0.0.1:{self.cfg.internal_rtsp_port}"
-            f"/{self.cfg.composite_path}"
-        )
-
         try:
             cmd = build_output(self.cfg)
         except Exception as e:
@@ -531,27 +520,9 @@ class StreamManager:
             self.notifier.send(f"\u26a0\ufe0f Output FFmpeg build error: {e}")
             return
 
+        # UDP/MPEG-TS input: no probe needed — FFmpeg blocks on the UDP
+        # socket until the compositor starts sending packets.
         for retry in range(OUTPUT_RETRY_LIMIT):
-            # Wait for compositor RTSP source to be ready
-            for attempt in range(1, 6):
-                if self._compositor and self._compositor.returncode is not None:
-                    log.warning(
-                        "Compositor dead during output startup — aborting"
-                    )
-                    return
-                info = await self._probe(relay_url)
-                if info and info.get("has_video"):
-                    break
-                log.info(
-                    "Waiting for compositor RTSP source (%d/5)...", attempt
-                )
-                await asyncio.sleep(2)
-            else:
-                log.warning(
-                    "Compositor RTSP source still not ready "
-                    "— starting output anyway"
-                )
-
             log.info("Output FFmpeg cmd: %s", " ".join(cmd))
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -613,9 +584,8 @@ class StreamManager:
             if compositor_crashed:
                 rc = self._compositor.returncode
                 log.warning("Compositor exited (code %d) — restarting", rc)
-                # Kill the output too — its RTSP source is gone
-                await self._terminate_process(self._output)
-                output_crashed = True
+                # With UDP transport, output stays alive — just restart
+                # the compositor and packets will resume.
                 if self._current_stream:
                     await self._start_compositor_live(self._current_stream)
                 else:
@@ -713,13 +683,21 @@ async def _log_stderr(
         if not line:
             break
         text = line.decode(errors="replace").rstrip()
-        # Downgrade noisy DTS discontinuity warnings to DEBUG —
-        # these are expected after compositor restarts and auto-corrected.
-        effective_level = level
-        if "Non-monotonic DTS" in text or "non monotone" in text.lower():
-            effective_level = logging.DEBUG
+        # Suppress noise that carries no diagnostic value:
+        # - Non-monotonic DTS: tee muxer auto-corrects timestamps
+        # - deprecated pixel format: harmless swscaler format conversion
+        if any(s in text for s in (
+            "Non-monotonic DTS",
+            "deprecated pixel format",
+            "Discarding interleaved",
+            "Last message repeated",
+            "non-existing PPS",
+            "decode_slice_header",
+            "no frame!",
+        )) or "non monotone" in text.lower():
+            continue
         log.log(
-            effective_level,
+            level,
             "[ffmpeg/%s] %s",
             label,
             text,
