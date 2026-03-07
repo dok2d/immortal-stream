@@ -12,14 +12,14 @@ DEFAULT_FONT = "/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
 # ---------------------------------------------------------------------------
 
 def _bufsize(bitrate: str) -> str:
-    """2x bitrate as bufsize string (e.g. '6000k' -> '12000k')."""
-    b = bitrate.lower()
+    """2x bitrate as bufsize string (e.g. '6000k' -> '12000k', '4.5m' -> '9.0m')."""
+    b = bitrate.lower().strip()
     try:
         if b.endswith("k"):
-            return f"{int(b[:-1]) * 2}k"
+            return f"{float(b[:-1]) * 2:g}k"
         if b.endswith("m"):
-            return f"{int(b[:-1]) * 2}m"
-        return f"{int(b) * 2}"
+            return f"{float(b[:-1]) * 2:g}m"
+        return f"{float(b) * 2:g}"
     except ValueError:
         return bitrate
 

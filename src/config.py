@@ -4,6 +4,8 @@ from typing import Optional, List
 import logging
 import os
 import secrets
+import shutil
+import socket
 
 import yaml
 
@@ -104,6 +106,7 @@ class Config:
     internal_rtmp_port: int = 1935
     mediamtx_api_port: int = 9997
     internal_udp_port: int = 5111
+    hook_server_port: int = 9998
     composite_path: str = field(default_factory=lambda: f"_c{secrets.token_hex(8)}")
 
 
@@ -171,6 +174,26 @@ def _validate(cfg: Config) -> None:
     if cfg.log_level not in _VALID_LOG_LEVELS:
         log.warning("Unknown log_level %r, falling back to INFO", cfg.log_level)
         cfg.log_level = "INFO"
+
+    # Validate placeholder/overlay file existence
+    if ph.type in ("image", "video") and ph.path and not os.path.isfile(ph.path):
+        raise ValueError(
+            f"placeholder.path {ph.path!r} does not exist "
+            f"(required for type={ph.type!r})"
+        )
+    if ov.enabled and ov.type == "image" and ov.path and not os.path.isfile(ov.path):
+        raise ValueError(
+            f"overlay.path {ov.path!r} does not exist "
+            f"(required for type='image')"
+        )
+
+    # Validate font files
+    for label, font_path in [
+        ("placeholder.font_path", ph.font_path),
+        ("overlay.font_path", ov.font_path),
+    ]:
+        if font_path and not os.path.isfile(font_path):
+            raise ValueError(f"{label} {font_path!r} does not exist")
 
 
 # ---------------------------------------------------------------------------

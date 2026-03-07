@@ -2,13 +2,15 @@
 """
 immortal-stream — fault-tolerant live streaming with 3-layer compositing.
 
-Entry point: loads config, starts mediamtx, stream manager (which polls
-the mediamtx API for stream events), compositor and output FFmpeg processes.
+Entry point: loads config, starts mediamtx, stream manager (receives
+mediamtx hook events), compositor and output FFmpeg processes.
 """
 import asyncio
 import logging
 import os
+import shutil
 import signal
+import socket
 import sys
 
 from config import load_config
@@ -31,6 +33,53 @@ def _is_telegram_configured(cfg) -> bool:
     return cfg.telegram.enabled and cfg.telegram.bot_token and cfg.telegram.chat_id
 
 
+def _check_port_available(port: int, proto: str = "udp") -> bool:
+    """Check if a port is available for binding."""
+    sock_type = socket.SOCK_DGRAM if proto == "udp" else socket.SOCK_STREAM
+    with socket.socket(socket.AF_INET, sock_type) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def _validate_startup_deps(cfg) -> None:
+    """Validate all external dependencies are available before starting."""
+    errors = []
+
+    # Required binaries
+    for binary in ("ffmpeg", "ffprobe", "curl"):
+        if not shutil.which(binary):
+            errors.append(f"Required binary not found: {binary}")
+
+    # mediamtx binary
+    mediamtx_bin = os.environ.get("MEDIAMTX_BIN", "/usr/local/bin/mediamtx")
+    if not shutil.which(mediamtx_bin) and not os.path.isfile(mediamtx_bin):
+        errors.append(f"mediamtx binary not found: {mediamtx_bin}")
+
+    # UDP port for compositor→output link
+    if not _check_port_available(cfg.internal_udp_port, "udp"):
+        errors.append(
+            f"UDP port {cfg.internal_udp_port} is not available "
+            f"(used for compositor→output link)"
+        )
+
+    # Hook server TCP port
+    if not _check_port_available(cfg.hook_server_port, "tcp"):
+        errors.append(
+            f"TCP port {cfg.hook_server_port} is not available "
+            f"(used for mediamtx hook server)"
+        )
+
+    if errors:
+        for e in errors:
+            log.critical(e)
+        raise RuntimeError(
+            f"Startup validation failed: {len(errors)} error(s)"
+        )
+
+
 async def main() -> None:
     # -- Load configuration ------------------------------------------------
     try:
@@ -41,6 +90,13 @@ async def main() -> None:
 
     level = getattr(logging, cfg.log_level, logging.INFO)
     logging.getLogger().setLevel(level)
+
+    # -- Validate startup dependencies ------------------------------------
+    try:
+        _validate_startup_deps(cfg)
+    except RuntimeError as e:
+        log.critical("%s", e)
+        sys.exit(1)
 
     log.info(
         "Config loaded: ingest=%d, srt=%d, targets=%d, placeholder=%s",
@@ -71,7 +127,7 @@ async def main() -> None:
         )
         sys.exit(1)
 
-    # -- Stream manager (polls mediamtx API for stream events) -------------
+    # -- Stream manager (hook server receives mediamtx events) --------------
     manager = StreamManager(cfg, notifier)
     await manager.start()
 

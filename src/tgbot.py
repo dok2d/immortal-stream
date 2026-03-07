@@ -48,14 +48,31 @@ class TelegramBot:
         self._chat_id = cfg.telegram.chat_id
         self._running = False
         self._awaiting: Optional[str] = None  # e.g. "target:add"
+        self._poll_task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._poll_loop())
+        self._poll_task = asyncio.create_task(self._poll_loop())
+        self._poll_task.add_done_callback(self._on_poll_done)
         log.info("Telegram bot started (chat_id=%s)", self._chat_id)
 
     async def stop(self) -> None:
         self._running = False
+        if self._poll_task:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            self._poll_task = None
+
+    @staticmethod
+    def _on_poll_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            log.error("Bot poll loop crashed: %s", exc)
 
     # ------------------------------------------------------------------ #
     #  Telegram API helpers                                                #

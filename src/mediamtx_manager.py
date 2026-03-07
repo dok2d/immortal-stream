@@ -77,8 +77,13 @@ def _gen_config_v1(cfg: Config) -> str:
 
     Uses true/false instead of yes/no for YAML 1.2 compatibility
     (mediamtx >= v1.15 uses goccy/go-yaml which is YAML 1.2 strict).
+
+    Stream detection uses runOnPublish/runOnUnpublish hooks that POST
+    to the internal hook server, giving near-instant event delivery
+    instead of polling.
     """
     hls_enabled = "true" if cfg.ingest.hls else "false"
+    hook_port = cfg.hook_server_port
     return (
         "logLevel: warn\n"
         "logDestinations: [stdout]\n"
@@ -100,6 +105,8 @@ def _gen_config_v1(cfg: Config) -> str:
         "webrtc: false\n"
         "\n"
         "pathDefaults:\n"
+        f'  runOnPublish: curl -sf -X POST http://127.0.0.1:{hook_port}/on_publish -d \'{{"path":"$MTX_PATH","conn_type":"$MTX_SOURCE_TYPE","conn_id":"$MTX_SOURCE_ID"}}\' -H "Content-Type: application/json"\n'
+        f'  runOnUnpublish: curl -sf -X POST http://127.0.0.1:{hook_port}/on_unpublish -d \'{{"path":"$MTX_PATH"}}\' -H "Content-Type: application/json"\n'
         "paths:\n"
         "  all_others:\n"
     )
@@ -108,6 +115,7 @@ def _gen_config_v1(cfg: Config) -> str:
 def _gen_config_v0(cfg: Config) -> str:
     """rtsp-simple-server / mediamtx v0.x — flat XxxEnabled keys."""
     hls_enabled = "yes" if cfg.ingest.hls else "no"
+    hook_port = cfg.hook_server_port
     return (
         "logLevel: warn\n"
         "logDestinations: [stdout]\n"
@@ -130,6 +138,8 @@ def _gen_config_v0(cfg: Config) -> str:
         "\n"
         "paths:\n"
         "  all:\n"
+        f'    runOnPublish: curl -sf -X POST http://127.0.0.1:{hook_port}/on_publish -d \'{{"path":"$RTSP_PATH","conn_type":"$RTSP_SOURCE_TYPE","conn_id":"$RTSP_SOURCE_ID"}}\' -H "Content-Type: application/json"\n'
+        f'    runOnUnpublish: curl -sf -X POST http://127.0.0.1:{hook_port}/on_unpublish -d \'{{"path":"$RTSP_PATH"}}\' -H "Content-Type: application/json"\n'
     )
 
 
@@ -148,6 +158,7 @@ class MediamtxManager:
         self.cfg = cfg
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._config_file: Optional[str] = None
+        self._log_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         """Generate config, write to temp file, and start mediamtx."""
@@ -165,7 +176,7 @@ class MediamtxManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        asyncio.create_task(self._log_output())
+        self._log_task = asyncio.create_task(self._log_output())
         log.info("mediamtx started (pid=%d)", self._proc.pid)
 
     async def wait_ready(self, timeout: float = 15.0) -> bool:
