@@ -145,12 +145,13 @@ def build_compositor_idle(cfg: Config) -> List[str]:
         cmd += _anullsrc(a.sample_rate)
 
         font = ph.font_path or DEFAULT_FONT
-        # Single quotes protect colons from drawtext option splitting.
-        # Inside quotes, use PLAIN colons — FFmpeg's text expansion
-        # engine looks for literal ':' to find the localtime argument,
-        # not '\:'.  The TZ env var (set by stream_manager) controls
-        # which timezone localtime reports.
-        time_text = "text='%{localtime:%H:%M:%S}'"
+        # Two escaping levels in -filter_complex:
+        #   1. Filter graph parser: \\  →  \   (strips one backslash)
+        #   2. Option parser:       \:  →  :   (escaped colon, not separator)
+        # So \\: in the string becomes \: after level 1, then : after level 2.
+        # Single quotes do NOT work here — the filter graph parser strips them,
+        # leaving colons unprotected for the option parser.
+        time_text = "text=%{localtime\\\\:%H\\\\:%M\\\\:%S}"
         opts = [
             f"fontfile={font}",
             time_text,
