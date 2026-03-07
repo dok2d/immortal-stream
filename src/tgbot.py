@@ -1125,7 +1125,7 @@ class TelegramBot:
             f"  Resolution: {v.width}\u00d7{v.height}\n"
             f"  FPS: {v.fps} (gop={v.gop})\n"
             f"  Bitrate: {v.bitrate}\n"
-            f"  Preset: {v.preset}\n"
+            f"  Preset: {v.preset} / tune: {v.tune}\n"
             f"  Audio: {a.bitrate} / {a.sample_rate}Hz"
         )
 

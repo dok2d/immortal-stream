@@ -22,7 +22,7 @@ Fault-tolerant live streaming relay with 3-layer compositing, designed to keep t
   Placeholder ──────────────▶ │   Compositor FFmpeg    │
   Overlay     ──────────────▶ │   (3-layer composite)  │
                               └──────────┬─────────────┘
-                                         │ internal relay
+                                         │ UDP/MPEG-TS
                                          ▼
                               ┌────────────────────────┐
                               │  Output FFmpeg         │  ──▶  YouTube
@@ -34,13 +34,13 @@ Fault-tolerant live streaming relay with 3-layer compositing, designed to keep t
 
 | Priority | Layer | Visibility |
 |----------|-------|-----------|
-| Base | **Placeholder** | Always sent to the target service. Shown as-is when no incoming stream is active. Keeps the broadcast alive. Can be: black screen, testcard (colour bars + clock), text, image, or looping video. |
+| Base | **Placeholder** | Always sent to the target service. Shown as-is when no incoming stream is active. Keeps the broadcast alive. Can be: black screen, testcard (colour bars + clock), image, or looping video. An optional text label can be drawn on top of any base type. |
 | Middle | **Incoming stream** | Any protocol and codec accepted (RTMP, RTSP, SRT, HLS). Replaces the placeholder while active. |
 | Top | **Overlay** | Image or text composited over the incoming stream. Shown **only** when a stream is active. |
 
 ### Continuous output guarantee
 
-The output FFmpeg process connects to the target service once at startup and **never disconnects**. A persistent internal relay (mediamtx) buffers the compositor output, so brief compositor restarts (< 2 s) during stream switching are invisible to the target service.
+The output FFmpeg process connects to the target service once at startup and **never disconnects**. The compositor sends encoded video to the output process over a connectionless UDP/MPEG-TS link on the loopback interface. Brief compositor restarts (~1 s) during stream switching cause a short pause in the UDP stream, but the output FFmpeg process keeps the RTMP connection alive and resumes forwarding as soon as packets return.
 
 ### Redundant input sources
 
@@ -53,13 +53,13 @@ Multiple input sources can be configured with priority ordering. The compositor 
 ### 1. Build the image
 
 ```sh
-podman build -t immortal-stream .
+podman build -f Containerfile -t immortal-stream .
 ```
 
 For ARM hosts (Raspberry Pi 4, Apple Silicon VM, etc.):
 
 ```sh
-podman build --build-arg TARGETARCH=arm64 -t immortal-stream .
+podman build -f Containerfile --build-arg TARGETARCH=arm64 -t immortal-stream .
 ```
 
 ### 2. Create your config
@@ -93,7 +93,7 @@ docker compose up -d
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 1935 | TCP | RTMP / RTSP ingest |
+| 1935 | TCP | RTMP ingest |
 | 8890 | UDP | SRT ingest |
 | 8888 | TCP | HLS ingest (optional, disabled by default) |
 
@@ -103,11 +103,19 @@ docker compose up -d
 
 All options live in a single YAML file. See [`config.example.yaml`](config.example.yaml) for a fully annotated example.
 
+### `log_level`
+
+```yaml
+log_level: INFO   # DEBUG | INFO | WARNING | ERROR
+```
+
+Can also be set via the `LOG_LEVEL` environment variable; the config file takes precedence.
+
 ### `ingest`
 
 ```yaml
 ingest:
-  port: 1935               # RTMP/RTSP ingest port
+  port: 1935               # RTMP ingest port
   srt_port: 8890           # SRT ingest port
   hls: false               # Enable HLS ingest (port 8888)
   hls_port: 8888           # HLS ingest port
@@ -141,13 +149,12 @@ Leave `redundant_sources` empty (default) to accept any single stream on `/live/
 
 ```yaml
 placeholder:
-  type: testcard           # black | testcard | text | image | video
-  timezone: UTC            # IANA tz name for testcard clock (e.g. Europe/Moscow)
-  # Text placeholder:
+  type: testcard           # black | testcard | image | video
+  # Optional text drawn on top of any base type:
   # text: "Stream starting soon"
-  # font_path: /media/fonts/DejaVuSans.ttf
+  # font_path: /media/fonts/MyFont.ttf   # TTF/OTF; JetBrains Mono if omitted
   # font_size: 72
-  # font_color: white
+  # font_color: white                    # FFmpeg color name or #RRGGBB
   # Image/video placeholder:
   # path: /media/holder.jpg  # required for image/video
   x: 0                      # position (text: 0,0 = centered)
@@ -155,7 +162,7 @@ placeholder:
   opacity: 1.0
 ```
 
-The placeholder is re-encoded to the configured output resolution. `testcard` shows colour bars with a live clock overlay. Images are padded with black bars to maintain aspect ratio. Videos loop seamlessly.
+The placeholder is re-encoded to the configured output resolution. `testcard` shows colour bars with a clock overlay. Images are padded with black bars to maintain aspect ratio. Videos loop seamlessly. An optional `text` field draws a label on top of any base type.
 
 ### `overlay`
 
@@ -188,7 +195,8 @@ output:
     fps: 30
     bitrate: 6000k
     preset: ultrafast      # x264 preset; ultrafast = lowest CPU
-    gop: 60
+    tune: zerolatency      # x264 tune (zerolatency|film|animation|grain|...)
+    gop: 60                # must be >= fps (minimum 1s keyframe interval)
   audio:
     bitrate: 128k
     sample_rate: 44100
@@ -211,12 +219,17 @@ Bot commands for runtime configuration:
 
 | Command | Description |
 |---------|-------------|
+| `/menu` | Main menu with inline keyboard buttons |
 | `/status` | Current stream state and settings |
-| `/placeholder black\|testcard\|text\|image\|video\|opacity\|timezone` | Change placeholder |
+| `/placeholder black\|testcard\|text\|image\|video\|opacity\|pos` | Change placeholder |
 | `/overlay off\|text\|image\|x\|y\|opacity\|size\|color` | Configure overlay |
 | `/target list\|add\|remove\|set` | Manage output RTMP targets |
 | `/output bitrate\|fps\|size\|preset` | Change output encoding |
+| `/stop` | Pause all processes (compositor + output) |
+| `/resume` | Restart all processes |
 | `/help` | Show available commands |
+
+The bot also accepts media uploads: send a photo to set the placeholder/overlay image, or a video to set the placeholder video. Changes are applied immediately but are **not persisted** — a container restart reverts to the config file.
 
 ---
 
@@ -227,7 +240,6 @@ Connect your encoder or source to:
 | Protocol | URL format |
 |----------|-----------|
 | RTMP | `rtmp://host:1935/live` or `rtmp://host:1935/live/<key>` |
-| RTSP | `rtsp://host:1935/live` |
 | SRT | `srt://host:8890` |
 | HLS | `http://host:8888/live` (when enabled) |
 
@@ -238,11 +250,12 @@ Any codec and resolution are accepted; the compositor re-encodes to the configur
 ## Security considerations
 
 - The container runs as a **non-root user** (uid 1000).
-- The internal RTMP relay path is protected by a randomly generated token, regenerated on each container start.
+- The internal RTSP relay path used between mediamtx and the compositor is protected by a randomly generated token, regenerated on each container start.
 - Config and media files are mounted **read-only**.
 - Only ingest ports are exposed externally. All internal components communicate over the loopback interface.
 - No outbound connections other than to configured RTMP targets and the Telegram API (if enabled).
 - Security hardening in compose.yaml: `no-new-privileges`, `cap_drop: ALL`, `tmpfs` for temporary files.
+- Built-in healthcheck polls the mediamtx API to verify the service is responsive.
 
 ---
 
@@ -287,4 +300,4 @@ podman logs -f immortal-stream
 | Podman | >= 4.0 |
 | Docker | >= 24 (alternative) |
 
-The image includes FFmpeg, mediamtx, and Python 3 — no other dependencies needed on the host.
+The image (Alpine-based) includes FFmpeg, mediamtx, and Python 3 — no other dependencies needed on the host.

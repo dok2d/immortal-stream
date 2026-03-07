@@ -67,23 +67,19 @@ ingest:
 # ── Placeholder layer ──────────────────────────────────────────────────────────
 # Shown to the target service whenever no incoming stream is active.
 placeholder:
-  # Type: black | text | image | video | testcard
-  # "testcard" is the default — colour bars with a live clock overlay.
+  # Type: black | image | video | testcard
+  # "testcard" is the default — colour bars test pattern.
   # "black" requires no files — good for testing out of the box.
   type: testcard
 
-  # Timezone for the testcard clock (IANA tz database name).
-  # Examples: UTC, Europe/Moscow, US/Eastern, Asia/Tokyo
-  timezone: UTC
-
-  # ── Text placeholder ─────────────────────────────────────────────
-  # (used when type: text)
+  # ── Text overlay on placeholder ──────────────────────────────────
+  # Text is additive — it appears on top of any base type.
+  # Set via Telegram bot or /placeholder text <text>
   # text: "Трансляция скоро начнётся"
   # font_path: /media/fonts/MyFont.ttf        # TTF/OTF font; JetBrains Mono used if omitted
   # font_size: 72
   # font_color: white                         # FFmpeg color name or #RRGGBB
 
-  # ── Image/video placeholder ──────────────────────────────────────
   # Path to the placeholder file (image: JPEG/PNG, video: any FFmpeg-readable).
   # Required only when type is image or video.
   # path: /media/placeholder.jpg
@@ -141,7 +137,8 @@ output:
     fps: 30
     bitrate: 6000k       # target video bitrate
     preset: ultrafast    # FFmpeg x264 preset (ultrafast…veryslow); keep ultrafast for low CPU
-    gop: 60              # keyframe interval in frames (= fps × 2 seconds recommended)
+    tune: zerolatency    # x264 tune (zerolatency, film, animation, grain, stillimage, fastdecode)
+    gop: 60              # keyframe interval in frames (= fps × 2 seconds recommended; must be >= fps)
 
   audio:
     bitrate: 128k
@@ -163,7 +160,7 @@ output:
 #   /status                    — current state and settings
 #   /stop                      — pause all processes (compositor + output)
 #   /resume                    — restart all processes
-#   /placeholder black|testcard|text|image|video|opacity|timezone
+#   /placeholder black|testcard|text|image|video|opacity|pos
 #   /overlay off|text|image|x|y|opacity|size|color
 #   /target list|add|remove|set
 #   /output bitrate|fps|size|preset
