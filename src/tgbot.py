@@ -1350,6 +1350,15 @@ class TelegramBot:
             or "  (none)"
         )
 
+        # CPU load hints
+        hints = _cpu_hints(self.cfg)
+        hints_block = ""
+        if hints:
+            hints_block = (
+                "\n\n\U0001f525 <b>CPU load:</b>\n"
+                + "\n".join(f"  \u2022 {h}" for h in hints)
+            )
+
         return (
             f"{state}\n\n"
             f"<b>Placeholder:</b> {ph_desc}\n"
@@ -1357,6 +1366,7 @@ class TelegramBot:
             f"<b>Output:</b> {v.width}\u00d7{v.height} "
             f"@{v.fps}fps {v.bitrate} preset={v.preset}\n"
             f"<b>Targets:</b>\n{targets}"
+            f"{hints_block}"
         )
 
     def _text_ph(self) -> str:
@@ -1708,6 +1718,80 @@ _MIN_WIDTH = 160
 _MAX_WIDTH = 3840
 _MIN_HEIGHT = 120
 _MAX_HEIGHT = 2160
+
+
+_PRESET_WEIGHT = {
+    "ultrafast": 0, "superfast": 1, "veryfast": 2, "faster": 3,
+    "fast": 4, "medium": 5, "slow": 6, "slower": 7, "veryslow": 8,
+}
+
+
+def _cpu_hints(cfg: Config) -> list:
+    """Return list of human-readable CPU optimization hints."""
+    hints = []
+    v = cfg.output.video
+    pw = _PRESET_WEIGHT.get(v.preset, 5)
+
+    # Preset
+    if pw >= 6:
+        hints.append(
+            f"<b>Preset {v.preset}</b> — heavy encoder; "
+            f"try <code>fast</code> or <code>veryfast</code> "
+            f"(/output preset)"
+        )
+
+    # Resolution
+    total_px = v.width * v.height
+    if total_px >= 3840 * 2160:
+        hints.append(
+            f"<b>4K ({v.width}\u00d7{v.height})</b> — "
+            f"extreme CPU; consider 1080p (/output size)"
+        )
+    elif total_px >= 2560 * 1440:
+        hints.append(
+            f"<b>1440p ({v.width}\u00d7{v.height})</b> — "
+            f"high CPU; consider 1080p (/output size)"
+        )
+
+    # FPS
+    if v.fps >= 60:
+        hints.append(
+            f"<b>{v.fps} fps</b> — double frames vs 30fps; "
+            f"try 30 (/output fps)"
+        )
+
+    # Bitrate vs preset — high bitrate with heavy preset
+    try:
+        br = v.bitrate.lower()
+        kbps = float(br.rstrip("km"))
+        if br.endswith("m"):
+            kbps *= 1000
+        if kbps >= 15000 and pw >= 4:
+            hints.append(
+                f"<b>{v.bitrate} + {v.preset}</b> — "
+                f"reduce bitrate or use lighter preset"
+            )
+    except (ValueError, AttributeError):
+        pass
+
+    # Overlay compositing
+    if cfg.overlay.enabled:
+        hints.append(
+            "<b>Overlay enabled</b> — adds compositing; "
+            "disable if not needed (/overlay off)"
+        )
+
+    # Multi-target
+    n = len(cfg.output.targets)
+    if n >= 3:
+        hints.append(
+            f"<b>{n} targets</b> — each adds muxing overhead"
+        )
+
+    if not hints:
+        hints.append("No bottlenecks detected")
+
+    return hints
 
 
 def _position_label(pos: str) -> str:
