@@ -1350,8 +1350,8 @@ class TelegramBot:
             or "  (none)"
         )
 
-        # CPU load hints
-        hints = _cpu_hints(self.cfg)
+        # CPU load hints (compare input vs output)
+        hints = _cpu_hints(self.cfg, stream)
         hints_block = ""
         if hints:
             hints_block = (
@@ -1726,70 +1726,140 @@ _PRESET_WEIGHT = {
 }
 
 
-def _cpu_hints(cfg: Config) -> list:
-    """Return list of human-readable CPU optimization hints."""
+def _parse_fps(fps_str: str) -> float:
+    """Parse fps string like '30', '29.97', '30/1', '60000/1001'."""
+    try:
+        if "/" in fps_str:
+            num, den = fps_str.split("/", 1)
+            return float(num) / float(den)
+        return float(fps_str)
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _cpu_hints(cfg: Config, stream=None) -> list:
+    """Return CPU load hints based on input/output mismatches."""
     hints = []
     v = cfg.output.video
+    a = cfg.output.audio
     pw = _PRESET_WEIGHT.get(v.preset, 5)
+    out_px = v.width * v.height
 
-    # Preset
+    if stream and stream.has_video and stream.width > 0 and stream.height > 0:
+        in_w, in_h = stream.width, stream.height
+        in_px = in_w * in_h
+
+        # --- Resolution mismatch ---
+        if in_w != v.width or in_h != v.height:
+            if in_px > out_px:
+                ratio = in_px / out_px
+                hints.append(
+                    f"<b>Downscale {in_w}\u00d7{in_h} \u2192 "
+                    f"{v.width}\u00d7{v.height}</b> ({ratio:.1f}x pixels) "
+                    f"(/output size)"
+                )
+            else:
+                ratio = out_px / in_px
+                hints.append(
+                    f"<b>Upscale {in_w}\u00d7{in_h} \u2192 "
+                    f"{v.width}\u00d7{v.height}</b> ({ratio:.1f}x pixels) "
+                    f"\u2014 wasteful, match input (/output size)"
+                )
+
+        # --- Aspect ratio mismatch (padding) ---
+        in_ar = in_w / in_h if in_h else 0
+        out_ar = v.width / v.height if v.height else 0
+        if in_ar and out_ar and abs(in_ar - out_ar) > 0.05:
+            hints.append(
+                f"<b>Aspect ratio mismatch</b> "
+                f"({in_ar:.2f} \u2192 {out_ar:.2f}) \u2014 "
+                f"padding added (/output size)"
+            )
+
+        # --- FPS mismatch ---
+        in_fps = _parse_fps(stream.fps)
+        if in_fps > 0 and in_fps != v.fps:
+            if in_fps > v.fps:
+                hints.append(
+                    f"<b>FPS drop {in_fps:.0f} \u2192 {v.fps}</b> "
+                    f"\u2014 frame skipping (/output fps)"
+                )
+            else:
+                hints.append(
+                    f"<b>FPS up {in_fps:.0f} \u2192 {v.fps}</b> "
+                    f"\u2014 frame duplication, wasteful (/output fps)"
+                )
+
+        # --- Codec decode complexity ---
+        codec = (stream.codec_video or "").lower()
+        if codec in ("hevc", "h265", "h.265"):
+            hints.append(
+                "<b>H.265 input</b> \u2014 heavy decode + re-encode to H.264"
+            )
+        elif codec in ("av1",):
+            hints.append(
+                "<b>AV1 input</b> \u2014 very heavy decode + re-encode to H.264"
+            )
+        elif codec in ("vp9",):
+            hints.append(
+                "<b>VP9 input</b> \u2014 heavy decode + re-encode to H.264"
+            )
+
+        # --- Audio sample rate mismatch ---
+        if stream.has_audio and stream.codec_audio != "n/a":
+            # We can't probe input sample rate from StreamInfo,
+            # but codec mismatch means re-encoding is guaranteed
+            audio_codec = (stream.codec_audio or "").lower()
+            if audio_codec and audio_codec not in ("aac",):
+                hints.append(
+                    f"<b>Audio {stream.codec_audio} \u2192 AAC</b> "
+                    f"\u2014 transcoding (/output audio)"
+                )
+
+    elif not stream:
+        # No live stream — placeholder mode
+        hints.append(
+            "<b>Placeholder active</b> \u2014 "
+            "generating video from scratch (normal idle load)"
+        )
+
+    # --- Always-on factors (regardless of stream) ---
+
+    # Preset weight
     if pw >= 6:
         hints.append(
-            f"<b>Preset {v.preset}</b> — heavy encoder; "
-            f"try <code>fast</code> or <code>veryfast</code> "
+            f"<b>Preset {v.preset}</b> \u2014 heavy encoder; "
+            f"try <code>fast</code>/<code>veryfast</code> (/output preset)"
+        )
+    elif pw >= 4:
+        hints.append(
+            f"<b>Preset {v.preset}</b> \u2014 moderate encoder load "
             f"(/output preset)"
         )
 
-    # Resolution
-    total_px = v.width * v.height
-    if total_px >= 3840 * 2160:
+    # Output resolution absolute cost
+    if out_px >= 3840 * 2160:
         hints.append(
-            f"<b>4K ({v.width}\u00d7{v.height})</b> — "
-            f"extreme CPU; consider 1080p (/output size)"
+            f"<b>4K output</b> \u2014 extreme encoding cost (/output size)"
         )
-    elif total_px >= 2560 * 1440:
+    elif out_px >= 2560 * 1440:
         hints.append(
-            f"<b>1440p ({v.width}\u00d7{v.height})</b> — "
-            f"high CPU; consider 1080p (/output size)"
+            f"<b>1440p output</b> \u2014 high encoding cost (/output size)"
         )
-
-    # FPS
-    if v.fps >= 60:
-        hints.append(
-            f"<b>{v.fps} fps</b> — double frames vs 30fps; "
-            f"try 30 (/output fps)"
-        )
-
-    # Bitrate vs preset — high bitrate with heavy preset
-    try:
-        br = v.bitrate.lower()
-        kbps = float(br.rstrip("km"))
-        if br.endswith("m"):
-            kbps *= 1000
-        if kbps >= 15000 and pw >= 4:
-            hints.append(
-                f"<b>{v.bitrate} + {v.preset}</b> — "
-                f"reduce bitrate or use lighter preset"
-            )
-    except (ValueError, AttributeError):
-        pass
 
     # Overlay compositing
     if cfg.overlay.enabled:
         hints.append(
-            "<b>Overlay enabled</b> — adds compositing; "
-            "disable if not needed (/overlay off)"
+            "<b>Overlay</b> \u2014 compositing filter active (/overlay off)"
         )
 
-    # Multi-target
+    # Multi-target muxing
     n = len(cfg.output.targets)
     if n >= 3:
-        hints.append(
-            f"<b>{n} targets</b> — each adds muxing overhead"
-        )
+        hints.append(f"<b>{n} targets</b> \u2014 muxing overhead")
 
     if not hints:
-        hints.append("No bottlenecks detected")
+        hints.append("\u2714 No bottlenecks detected")
 
     return hints
 
