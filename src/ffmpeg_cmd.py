@@ -110,6 +110,49 @@ def _escape_drawtext(text: str) -> str:
     )
 
 
+# Position presets for drawtext filter (x_expr, y_expr).
+# Uses FFmpeg drawtext variables: w, h, text_w, text_h.
+_DRAWTEXT_POSITIONS = {
+    "top-left":      ("20", "20"),
+    "top-center":    ("(w-text_w)/2", "20"),
+    "top-right":     ("w-text_w-20", "20"),
+    "left":          ("20", "(h-text_h)/2"),
+    "center":        ("(w-text_w)/2", "(h-text_h)/2"),
+    "right":         ("w-text_w-20", "(h-text_h)/2"),
+    "bottom-left":   ("20", "h-text_h-20"),
+    "bottom-center": ("(w-text_w)/2", "h-text_h-20"),
+    "bottom-right":  ("w-text_w-20", "h-text_h-20"),
+}
+
+# Position presets for overlay filter (x_expr, y_expr).
+# Uses FFmpeg overlay variables: main_w, main_h, overlay_w, overlay_h.
+_OVERLAY_POSITIONS = {
+    "top-left":      ("20", "20"),
+    "top-center":    ("(main_w-overlay_w)/2", "20"),
+    "top-right":     ("main_w-overlay_w-20", "20"),
+    "left":          ("20", "(main_h-overlay_h)/2"),
+    "center":        ("(main_w-overlay_w)/2", "(main_h-overlay_h)/2"),
+    "right":         ("main_w-overlay_w-20", "(main_h-overlay_h)/2"),
+    "bottom-left":   ("20", "main_h-overlay_h-20"),
+    "bottom-center": ("(main_w-overlay_w)/2", "main_h-overlay_h-20"),
+    "bottom-right":  ("main_w-overlay_w-20", "main_h-overlay_h-20"),
+}
+
+
+def _resolve_drawtext_pos(position: str, x: int = 0, y: int = 0):
+    """Resolve position preset to (x_expr, y_expr) for drawtext."""
+    if position in _DRAWTEXT_POSITIONS:
+        return _DRAWTEXT_POSITIONS[position]
+    return (str(x) if x else "(w-text_w)/2", str(y) if y else "(h-text_h)/2")
+
+
+def _resolve_overlay_pos(position: str, x: int = 0, y: int = 0):
+    """Resolve position preset to (x_expr, y_expr) for overlay filter."""
+    if position in _OVERLAY_POSITIONS:
+        return _OVERLAY_POSITIONS[position]
+    return (str(x), str(y))
+
+
 def _encoding_flags(cfg: Config) -> List[str]:
     """Common encoding flags for the compositor output (video + audio)."""
     v = cfg.output.video
@@ -199,8 +242,7 @@ def _placeholder_text_filter(
         return None
     escaped = _escape_drawtext(ph.text)
     font = ph.font_path or DEFAULT_FONT
-    x_expr = str(ph.x) if ph.x is not None and ph.x != 0 else "(w-text_w)/2"
-    y_expr = str(ph.y) if ph.y is not None and ph.y != 0 else "(h-text_h)/2"
+    x_expr, y_expr = _resolve_drawtext_pos(ph.text_position, ph.x, ph.y)
     opts = [
         f"fontfile={font}",
         f"text={escaped}",
@@ -346,8 +388,9 @@ def build_compositor_live(
                 if ov.opacity < 1.0 else ""
             )
             filters.append(f"[{input_idx}:v]format=rgba{alpha}[ov_img]")
+            ox, oy = _resolve_overlay_pos(ov.position, ov.x, ov.y)
             filters.append(
-                f"[{last_v}][ov_img]overlay={ov.x}:{ov.y}[vwith_ov]"
+                f"[{last_v}][ov_img]overlay={ox}:{oy}[vwith_ov]"
             )
             last_v = "vwith_ov"
             input_idx += 1
@@ -355,11 +398,12 @@ def build_compositor_live(
         elif ov.type == "text" and ov.text:
             escaped = _escape_drawtext(ov.text)
             font = ov.font_path or DEFAULT_FONT
+            tx, ty = _resolve_drawtext_pos(ov.position, ov.x, ov.y)
             opts = [
                 f"fontfile={font}",
                 f"text={escaped}",
-                f"x={ov.x}",
-                f"y={ov.y}",
+                f"x={tx}",
+                f"y={ty}",
                 f"fontsize={ov.font_size}",
                 f"fontcolor={ov.font_color}@{ov.opacity:.3f}",
             ] + _border_opts(ov.font_color)
@@ -382,6 +426,89 @@ def build_compositor_live(
             f"[{input_idx}:a]aformat=sample_rates={a.sample_rate}:"
             f"channel_layouts=stereo[aout]"
         )
+
+    cmd += ["-filter_complex", ";".join(filters)]
+    cmd += ["-map", "[vout]", "-map", "[aout]"]
+    cmd += _encoding_flags(cfg)
+    cmd += ["-f", "mpegts", dest]
+    return cmd
+
+
+# ---------------------------------------------------------------------------
+#  Compositor: AUDIO-ONLY state
+# ---------------------------------------------------------------------------
+
+def build_compositor_audio_only(
+    cfg: Config,
+    stream_path: str,
+    video_has_audio: bool = False,
+) -> List[str]:
+    """Compositor for audio-only input — keeps placeholder video,
+    replaces placeholder audio with the incoming stream's audio.
+
+    When the incoming stream has audio but no video (e.g. audio-only
+    source from OBS), the placeholder image/video stays on screen
+    and only the audio track is replaced.
+    """
+    v = cfg.output.video
+    a = cfg.output.audio
+    ph = cfg.placeholder
+    dest = _composite_dest(cfg)
+    stream_url = f"rtsp://127.0.0.1:{cfg.internal_rtsp_port}/{stream_path}"
+
+    cmd = _ffmpeg_base()
+    filters: List[str] = []
+    last_v = "vbase"
+
+    # ── Placeholder video (same as idle mode) ──────────────────────────
+    if ph.type == "black":
+        cmd += [
+            "-re", "-f", "lavfi", "-i",
+            f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
+        ]
+        filters.append("[0:v]copy[vbase]")
+
+    elif ph.type == "testcard":
+        cmd += [
+            "-re", "-f", "lavfi", "-i",
+            f"testsrc2=s={v.width}x{v.height}:r={v.fps}:sar=1/1",
+        ]
+        filters.append("[0:v]copy[vbase]")
+
+    elif ph.type == "image":
+        cmd += ["-re", "-loop", "1", "-i", ph.path]
+        filters.append(_scale_pad(v, "0:v", "vscaled"))
+        if ph.opacity < 1.0:
+            filters.append(
+                f"[vscaled]format=rgba,"
+                f"colorchannelmixer=aa={ph.opacity:.3f}[vbase]"
+            )
+        else:
+            filters.append("[vscaled]copy[vbase]")
+
+    elif ph.type == "video":
+        cmd += ["-re", "-stream_loop", "-1", "-i", ph.path]
+        filters.append(_scale_pad(v, "0:v", "vbase"))
+
+    else:
+        raise ValueError(f"Unknown placeholder.type: {ph.type!r}")
+
+    # ── Placeholder text overlay (additive) ────────────────────────────
+    text_f = _placeholder_text_filter(ph, last_v, "vout")
+    if text_f:
+        filters.append(text_f)
+    else:
+        filters.append(f"[{last_v}]copy[vout]")
+
+    # ── Audio from the incoming stream ─────────────────────────────────
+    stream_input_idx = len(cmd[cmd.index("-i") - 1:]) // 2  # rough
+    # Simpler: count how many -i flags we have so far
+    input_count = sum(1 for x in cmd if x == "-i")
+    cmd += ["-rtsp_transport", "tcp", "-i", stream_url]
+    filters.append(
+        f"[{input_count}:a]aresample={a.sample_rate},"
+        f"aformat=channel_layouts=stereo[aout]"
+    )
 
     cmd += ["-filter_complex", ";".join(filters)]
     cmd += ["-map", "[vout]", "-map", "[aout]"]

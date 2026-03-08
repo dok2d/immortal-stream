@@ -24,6 +24,14 @@ _X264_TUNES = {
 }
 
 
+POSITION_PRESETS = (
+    "top-left", "top-center", "top-right",
+    "left", "center", "right",
+    "bottom-left", "bottom-center", "bottom-right",
+    "custom",
+)
+
+
 @dataclass
 class PlaceholderConfig:
     type: str = "testcard"
@@ -32,6 +40,7 @@ class PlaceholderConfig:
     font_path: Optional[str] = None
     font_size: int = 72
     font_color: str = "white"
+    text_position: str = "center"
     x: int = 0
     y: int = 0
     opacity: float = 1.0
@@ -46,8 +55,9 @@ class OverlayConfig:
     font_path: Optional[str] = None
     font_size: int = 48
     font_color: str = "white"
-    x: int = 10
-    y: int = 10
+    position: str = "top-left"
+    x: int = 20
+    y: int = 20
     opacity: float = 1.0
 
 
@@ -159,16 +169,27 @@ def _validate(cfg: Config) -> None:
             f"output.video.tune must be one of {sorted(_X264_TUNES)}, "
             f"got {v.tune!r}"
         )
-    if not 1 <= v.fps <= 120:
-        raise ValueError(f"output.video.fps must be 1–120, got {v.fps}")
-    if not (160 <= v.width <= 7680 and 90 <= v.height <= 4320):
+    if not 1 <= v.fps <= 60:
         raise ValueError(
-            f"output.video size out of range: {v.width}x{v.height}"
+            f"output.video.fps must be 1–60 "
+            f"(YouTube/Twitch max 60), got {v.fps}"
+        )
+    if not (160 <= v.width <= 3840 and 120 <= v.height <= 2160):
+        raise ValueError(
+            f"output.video size out of range: {v.width}x{v.height} "
+            f"(allowed 160x120–3840x2160)"
         )
     if v.gop < v.fps:
         raise ValueError(
             f"output.video.gop ({v.gop}) must be >= fps ({v.fps}); "
             f"minimum keyframe interval is 1 second"
+        )
+
+    a = cfg.output.audio
+    if a.sample_rate not in (44100, 48000):
+        raise ValueError(
+            f"output.audio.sample_rate must be 44100 or 48000, "
+            f"got {a.sample_rate}"
         )
 
     if cfg.log_level not in _VALID_LOG_LEVELS:

@@ -34,7 +34,10 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
 from config import Config
-from ffmpeg_cmd import build_compositor_idle, build_compositor_live, build_output, file_has_audio
+from ffmpeg_cmd import (
+    build_compositor_idle, build_compositor_live, build_compositor_audio_only,
+    build_output, file_has_audio,
+)
 
 log = logging.getLogger("stream_manager")
 
@@ -356,7 +359,12 @@ class StreamManager:
             # This is the best available stream — switch compositor to it
             old_stream = self._current_stream
             self._current_stream = info
-            await self._start_compositor_live(info)
+
+            if info.has_audio and not info.has_video:
+                # Audio-only: keep placeholder video, use incoming audio
+                await self._start_compositor_audio_only(info)
+            else:
+                await self._start_compositor_live(info)
 
             if old_stream:
                 self._notify_preemption(old_stream, info, remote_addr, conn_type)
@@ -385,7 +393,10 @@ class StreamManager:
             if next_path and next_path in self._active_streams:
                 next_info = self._active_streams[next_path]
                 self._current_stream = next_info
-                await self._start_compositor_live(next_info)
+                if next_info.has_audio and not next_info.has_video:
+                    await self._start_compositor_audio_only(next_info)
+                else:
+                    await self._start_compositor_live(next_info)
                 log.info(
                     "Failover: %s -> %s (was active %ds)",
                     path, next_path, duration,
@@ -496,7 +507,11 @@ class StreamManager:
         """Restart compositor with current config (placeholder/overlay changed)."""
         async with self._lock:
             if self._current_stream:
-                await self._start_compositor_live(self._current_stream)
+                info = self._current_stream
+                if info.has_audio and not info.has_video:
+                    await self._start_compositor_audio_only(info)
+                else:
+                    await self._start_compositor_live(info)
             else:
                 await self._start_compositor_idle()
 
@@ -533,6 +548,24 @@ class StreamManager:
             self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
             return
         await self._replace_compositor(cmd, f"LIVE({info.path})")
+
+    async def _start_compositor_audio_only(self, info: StreamInfo) -> None:
+        """Audio-only mode: placeholder video + incoming audio."""
+        try:
+            ph = self.cfg.placeholder
+            ph_has_audio = (
+                await file_has_audio(ph.path)
+                if ph.type == "video" and ph.path
+                else False
+            )
+            cmd = build_compositor_audio_only(
+                self.cfg, info.path, video_has_audio=ph_has_audio,
+            )
+        except Exception as e:
+            log.error("Failed to build audio-only compositor: %s", e)
+            self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
+            return
+        await self._replace_compositor(cmd, f"AUDIO({info.path})")
 
     async def _replace_compositor(self, cmd: list, label: str) -> None:
         """Replace the running compositor with a new one.
@@ -663,8 +696,11 @@ class StreamManager:
                     if (self._compositor is not None
                             and self._compositor.returncode is not None):
                         if self._current_stream:
-                            await self._start_compositor_live(
-                                self._current_stream)
+                            info = self._current_stream
+                            if info.has_audio and not info.has_video:
+                                await self._start_compositor_audio_only(info)
+                            else:
+                                await self._start_compositor_live(info)
                         else:
                             await self._start_compositor_idle()
 

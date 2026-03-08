@@ -21,7 +21,7 @@ import re
 import urllib.request
 from typing import Callable, Optional, TYPE_CHECKING
 
-from config import Config, _X264_PRESETS
+from config import Config, _X264_PRESETS, POSITION_PRESETS
 
 if TYPE_CHECKING:
     from stream_manager import StreamManager
@@ -236,7 +236,11 @@ class TelegramBot:
             "menu":   self._cb_menu,
             "status": self._cb_status,
             "ph":     self._cb_placeholder,
+            "phtxt":  self._cb_ph_text,
+            "phpos":  self._cb_ph_pos,
             "ov":     self._cb_overlay,
+            "ovtxt":  self._cb_ov_text,
+            "ovpos":  self._cb_ov_pos,
             "target": self._cb_target,
             "out":    self._cb_output,
             "power":  self._cb_power,
@@ -398,16 +402,6 @@ class TelegramBot:
                 _kb_ph(self.cfg), "Testcard",
             )
 
-        if act == "text":
-            self._awaiting = "ph:text"
-            await self._send_prompt(
-                "\u270f\ufe0f Send text to overlay on the placeholder.\n"
-                "This text is additive — it appears on top of the current "
-                "base type (black/testcard/image/video).\n"
-                "Send <code>off</code> to remove text."
-            )
-            return None, None, ""
-
         if act == "image":
             self._awaiting = "ph:image"
             await self._send_prompt(
@@ -431,17 +425,92 @@ class TelegramBot:
             )
             return None, None, ""
 
-        if act == "pos":
-            self._awaiting = "ph:pos"
-            ph = self.cfg.placeholder
+        return self._text_ph(), _kb_ph(self.cfg), ""
+
+    # -- Placeholder Text submenu ------------------------------------------
+
+    async def _cb_ph_text(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_text(), _kb_ph_text(self.cfg), ""
+
+        if act == "content":
+            self._awaiting = "ph:text"
             await self._send_prompt(
-                f"Current position: {ph.x},{ph.y}\n"
-                "Send <code>x,y</code> coordinates for the text.\n"
-                "Use <code>0,0</code> for center (default)."
+                "\u270f\ufe0f Send text to overlay on the placeholder.\n"
+                "This text is additive \u2014 shown on top of the "
+                "base (black/testcard/image/video).\n"
+                "Send <code>off</code> to remove text."
             )
             return None, None, ""
 
-        return self._text_ph(), _kb_ph(self.cfg), ""
+        if act == "off":
+            self.cfg.placeholder.text = None
+            await self.manager.reload_compositor()
+            return (
+                self._text_ph_text() + "\n\n\u2705 Text removed",
+                _kb_ph_text(self.cfg), "Removed",
+            )
+
+        if act == "size":
+            self._awaiting = "ph:fontsize"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.font_size}px\n"
+                "Send font size (8\u2013500):"
+            )
+            return None, None, ""
+
+        if act == "color":
+            self._awaiting = "ph:fontcolor"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.font_color}\n"
+                "Send color name or #RRGGBB:"
+            )
+            return None, None, ""
+
+        if act == "pos":
+            return self._text_ph_pos(), _kb_position("phpos"), ""
+
+        if act == "opacity":
+            self._awaiting = "ph:textopacity"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.opacity:.2f}\n"
+                "Send text opacity (0.0\u20131.0):"
+            )
+            return None, None, ""
+
+        if act == "font":
+            self._awaiting = "ph:font"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.font_path or 'default (JetBrains Mono)'}\n"
+                "Send path to TTF/OTF font file, or <code>default</code>:"
+            )
+            return None, None, ""
+
+        return self._text_ph_text(), _kb_ph_text(self.cfg), ""
+
+    async def _cb_ph_pos(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_pos(), _kb_position("phpos"), ""
+
+        if act == "custom":
+            self._awaiting = "ph:custompos"
+            await self._send_prompt(
+                "Send coordinates as <code>x,y</code> (pixels):"
+            )
+            return None, None, ""
+
+        # Position preset
+        if act in POSITION_PRESETS and act != "custom":
+            self.cfg.placeholder.text_position = act
+            await self.manager.reload_compositor()
+            return (
+                self._text_ph_pos() + f"\n\n\u2705 {act}",
+                _kb_position("phpos"), act,
+            )
 
     # -- Overlay -----------------------------------------------------------
 
@@ -461,11 +530,6 @@ class TelegramBot:
             await self.manager.reload_compositor()
             return self._text_ov() + "\n\n\u2705 Enabled", _kb_ov(self.cfg), "On"
 
-        if act == "text":
-            self._awaiting = "ov:text"
-            await self._send_prompt("\u270f\ufe0f Send overlay text:")
-            return None, None, ""
-
         if act == "image":
             self._awaiting = "ov:image"
             await self._send_prompt(
@@ -474,18 +538,88 @@ class TelegramBot:
             )
             return None, None, ""
 
-        prompts = {
-            "pos":     f"Current: ({self.cfg.overlay.x}, {self.cfg.overlay.y})\nSend as <code>X Y</code>:",
-            "opacity": f"Current: {self.cfg.overlay.opacity:.2f}\nSend value (0.0\u20131.0):",
-            "size":    f"Current: {self.cfg.overlay.font_size}px\nSend new size:",
-            "color":   f"Current: {self.cfg.overlay.font_color}\nSend color name or #RRGGBB:",
-        }
-        if act in prompts:
-            self._awaiting = f"ov:{act}"
-            await self._send_prompt(prompts[act])
+        if act == "opacity":
+            self._awaiting = "ov:opacity"
+            await self._send_prompt(
+                f"Current: {self.cfg.overlay.opacity:.2f}\n"
+                "Send value (0.0\u20131.0):"
+            )
             return None, None, ""
 
         return self._text_ov(), _kb_ov(self.cfg), ""
+
+    # -- Overlay Text submenu -----------------------------------------------
+
+    async def _cb_ov_text(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ov_text(), _kb_ov_text(self.cfg), ""
+
+        if act == "content":
+            self._awaiting = "ov:text"
+            await self._send_prompt("\u270f\ufe0f Send overlay text:")
+            return None, None, ""
+
+        if act == "size":
+            self._awaiting = "ov:size"
+            await self._send_prompt(
+                f"Current: {self.cfg.overlay.font_size}px\n"
+                "Send font size (8\u2013500):"
+            )
+            return None, None, ""
+
+        if act == "color":
+            self._awaiting = "ov:color"
+            await self._send_prompt(
+                f"Current: {self.cfg.overlay.font_color}\n"
+                "Send color name or #RRGGBB:"
+            )
+            return None, None, ""
+
+        if act == "pos":
+            return self._text_ov_pos(), _kb_position("ovpos"), ""
+
+        if act == "opacity":
+            self._awaiting = "ov:textopacity"
+            await self._send_prompt(
+                f"Current: {self.cfg.overlay.opacity:.2f}\n"
+                "Send text opacity (0.0\u20131.0):"
+            )
+            return None, None, ""
+
+        if act == "font":
+            self._awaiting = "ov:font"
+            await self._send_prompt(
+                f"Current: {self.cfg.overlay.font_path or 'default (JetBrains Mono)'}\n"
+                "Send path to TTF/OTF font file, or <code>default</code>:"
+            )
+            return None, None, ""
+
+        return self._text_ov_text(), _kb_ov_text(self.cfg), ""
+
+    async def _cb_ov_pos(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ov_pos(), _kb_position("ovpos"), ""
+
+        if act == "custom":
+            self._awaiting = "ov:custompos"
+            await self._send_prompt(
+                "Send coordinates as <code>x,y</code> (pixels):"
+            )
+            return None, None, ""
+
+        # Position preset
+        if act in POSITION_PRESETS and act != "custom":
+            self.cfg.overlay.position = act
+            if self.cfg.overlay.enabled:
+                await self.manager.reload_compositor()
+            return (
+                self._text_ov_pos() + f"\n\n\u2705 {act}",
+                _kb_position("ovpos"), act,
+            )
 
     # -- Targets -----------------------------------------------------------
 
@@ -587,12 +721,12 @@ class TelegramBot:
             if val.lower() == "off":
                 self.cfg.placeholder.text = None
                 await self.manager.reload_compositor()
-                return "\u2705 Placeholder text removed", _kb_ph(self.cfg)
+                return "\u2705 Placeholder text removed", _kb_ph_text(self.cfg)
             self.cfg.placeholder.text = val
             await self.manager.reload_compositor()
             return (
-                f"\u2705 Placeholder text overlay:\n<code>{val}</code>",
-                _kb_ph(self.cfg),
+                f"\u2705 Placeholder text:\n<code>{val}</code>",
+                _kb_ph_text(self.cfg),
             )
 
         if action in ("ph:image", "ph:video"):
@@ -619,18 +753,57 @@ class TelegramBot:
             await self.manager.reload_compositor()
             return f"\u2705 Opacity: {v:.2f}", _kb_ph(self.cfg)
 
-        if action == "ph:pos":
+        if action == "ph:fontsize":
+            try:
+                v = int(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be an integer", _kb_ph_text(self.cfg)
+            if not 8 <= v <= 500:
+                return "\u274c Font size must be 8\u2013500", _kb_ph_text(self.cfg)
+            self.cfg.placeholder.font_size = v
+            await self.manager.reload_compositor()
+            return f"\u2705 Font size: {v}px", _kb_ph_text(self.cfg)
+
+        if action == "ph:fontcolor":
+            self.cfg.placeholder.font_color = text.strip()
+            await self.manager.reload_compositor()
+            return f"\u2705 Color: {text.strip()}", _kb_ph_text(self.cfg)
+
+        if action == "ph:textopacity":
+            try:
+                v = float(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ph_text(self.cfg)
+            if not 0.0 <= v <= 1.0:
+                return "\u274c Must be 0.0\u20131.0", _kb_ph_text(self.cfg)
+            self.cfg.placeholder.opacity = v
+            await self.manager.reload_compositor()
+            return f"\u2705 Text opacity: {v:.2f}", _kb_ph_text(self.cfg)
+
+        if action == "ph:font":
+            val = text.strip()
+            if val.lower() == "default":
+                self.cfg.placeholder.font_path = None
+            elif os.path.isfile(val):
+                self.cfg.placeholder.font_path = val
+            else:
+                return f"\u274c File not found: <code>{val}</code>", _kb_ph_text(self.cfg)
+            await self.manager.reload_compositor()
+            return f"\u2705 Font: {val}", _kb_ph_text(self.cfg)
+
+        if action == "ph:custompos":
             parts = text.replace(" ", "").split(",")
             if len(parts) != 2:
-                return "\u274c Format: <code>x,y</code> (e.g. 100,200)", _kb_ph(self.cfg)
+                return "\u274c Format: <code>x,y</code>", _kb_position("phpos")
             try:
                 x, y = int(parts[0]), int(parts[1])
             except (ValueError, TypeError):
-                return "\u274c Coordinates must be integers", _kb_ph(self.cfg)
+                return "\u274c Coordinates must be integers", _kb_position("phpos")
+            self.cfg.placeholder.text_position = "custom"
             self.cfg.placeholder.x = x
             self.cfg.placeholder.y = y
             await self.manager.reload_compositor()
-            return f"\u2705 Text position: ({x},{y})", _kb_ph(self.cfg)
+            return f"\u2705 Position: ({x},{y})", _kb_position("phpos")
 
         # -- Overlay --
         if action == "ov:text":
@@ -638,7 +811,7 @@ class TelegramBot:
             self.cfg.overlay.type = "text"
             self.cfg.overlay.text = text.strip("\"'")
             await self.manager.reload_compositor()
-            return f"\u2705 Overlay text:\n<code>{text}</code>", _kb_ov(self.cfg)
+            return f"\u2705 Overlay text:\n<code>{text}</code>", _kb_ov_text(self.cfg)
 
         if action == "ov:image":
             if not os.path.isfile(text):
@@ -649,19 +822,20 @@ class TelegramBot:
             await self.manager.reload_compositor()
             return f"\u2705 Overlay image:\n<code>{text}</code>", _kb_ov(self.cfg)
 
-        if action == "ov:pos":
-            parts = text.split()
-            if len(parts) < 2:
-                return "\u274c Send as: <code>X Y</code>", _kb_ov(self.cfg)
+        if action == "ov:custompos":
+            parts = text.replace(" ", "").split(",")
+            if len(parts) != 2:
+                return "\u274c Format: <code>x,y</code>", _kb_position("ovpos")
             try:
                 x, y = int(parts[0]), int(parts[1])
             except (ValueError, TypeError):
-                return "\u274c X and Y must be integers", _kb_ov(self.cfg)
+                return "\u274c Coordinates must be integers", _kb_position("ovpos")
+            self.cfg.overlay.position = "custom"
             self.cfg.overlay.x = x
             self.cfg.overlay.y = y
             if self.cfg.overlay.enabled:
                 await self.manager.reload_compositor()
-            return f"\u2705 Position: ({x}, {y})", _kb_ov(self.cfg)
+            return f"\u2705 Position: ({x},{y})", _kb_position("ovpos")
 
         if action == "ov:opacity":
             try:
@@ -675,23 +849,47 @@ class TelegramBot:
                 await self.manager.reload_compositor()
             return f"\u2705 Opacity: {v:.2f}", _kb_ov(self.cfg)
 
+        if action == "ov:textopacity":
+            try:
+                v = float(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ov_text(self.cfg)
+            if not 0.0 <= v <= 1.0:
+                return "\u274c Must be 0.0\u20131.0", _kb_ov_text(self.cfg)
+            self.cfg.overlay.opacity = v
+            if self.cfg.overlay.enabled:
+                await self.manager.reload_compositor()
+            return f"\u2705 Text opacity: {v:.2f}", _kb_ov_text(self.cfg)
+
         if action == "ov:size":
             try:
                 v = int(text)
             except (ValueError, TypeError):
-                return "\u274c Must be an integer", _kb_ov(self.cfg)
-            if not 1 <= v <= 500:
-                return "\u274c Font size must be 1\u2013500", _kb_ov(self.cfg)
+                return "\u274c Must be an integer", _kb_ov_text(self.cfg)
+            if not 8 <= v <= 500:
+                return "\u274c Font size must be 8\u2013500", _kb_ov_text(self.cfg)
             self.cfg.overlay.font_size = v
             if self.cfg.overlay.enabled:
                 await self.manager.reload_compositor()
-            return f"\u2705 Font size: {v}px", _kb_ov(self.cfg)
+            return f"\u2705 Font size: {v}px", _kb_ov_text(self.cfg)
 
         if action == "ov:color":
             self.cfg.overlay.font_color = text.strip()
             if self.cfg.overlay.enabled:
                 await self.manager.reload_compositor()
-            return f"\u2705 Color: {text.strip()}", _kb_ov(self.cfg)
+            return f"\u2705 Color: {text.strip()}", _kb_ov_text(self.cfg)
+
+        if action == "ov:font":
+            val = text.strip()
+            if val.lower() == "default":
+                self.cfg.overlay.font_path = None
+            elif os.path.isfile(val):
+                self.cfg.overlay.font_path = val
+            else:
+                return f"\u274c File not found: <code>{val}</code>", _kb_ov_text(self.cfg)
+            if self.cfg.overlay.enabled:
+                await self.manager.reload_compositor()
+            return f"\u2705 Font: {val}", _kb_ov_text(self.cfg)
 
         # -- Targets --
         if action == "target:add":
@@ -710,24 +908,25 @@ class TelegramBot:
 
         # -- Output encoding --
         if action == "out:bitrate":
-            val = text.strip().lower()
-            if not _is_valid_bitrate(val):
+            normalized = _normalize_bitrate(text)
+            if not normalized:
                 return (
-                    "\u274c Invalid bitrate. Examples: "
-                    "<code>6000k</code>, <code>8M</code>, <code>4500k</code>",
+                    "\u274c Invalid bitrate.\n"
+                    "Examples: <code>6000</code>, <code>6000k</code>, <code>8m</code>\n"
+                    f"Range: {_MIN_BITRATE_KBPS}k\u2013{_MAX_BITRATE_KBPS}k",
                     _kb_out(self.cfg),
                 )
-            self.cfg.output.video.bitrate = val
+            self.cfg.output.video.bitrate = normalized
             await self.manager.reload_compositor()
-            return f"\u2705 Bitrate: {val}", _kb_out(self.cfg)
+            return f"\u2705 Bitrate: {normalized}", _kb_out(self.cfg)
 
         if action == "out:fps":
             try:
-                fps = int(text)
+                fps = int(text.strip())
             except (ValueError, TypeError):
-                return "\u274c FPS must be an integer (1\u2013120)", _kb_out(self.cfg)
-            if not 1 <= fps <= 120:
-                return "\u274c FPS must be 1\u2013120", _kb_out(self.cfg)
+                return f"\u274c FPS must be an integer ({_MIN_FPS}\u2013{_MAX_FPS})", _kb_out(self.cfg)
+            if not _MIN_FPS <= fps <= _MAX_FPS:
+                return f"\u274c FPS must be {_MIN_FPS}\u2013{_MAX_FPS}", _kb_out(self.cfg)
             self.cfg.output.video.fps = fps
             self.cfg.output.video.gop = fps * 2
             await self.manager.reload_compositor()
@@ -735,12 +934,16 @@ class TelegramBot:
 
         if action == "out:size":
             try:
-                w_s, h_s = text.lower().split("x")
-                w, h = int(w_s), int(h_s)
+                w_s, h_s = text.strip().lower().split("x")
+                w, h = int(w_s.strip()), int(h_s.strip())
             except (ValueError, TypeError):
                 return "\u274c Format: <code>WxH</code> (e.g. 1920x1080)", _kb_out(self.cfg)
-            if not (160 <= w <= 7680 and 90 <= h <= 4320):
-                return "\u274c Size out of range (160\u20137680 x 90\u20134320)", _kb_out(self.cfg)
+            if not (_MIN_WIDTH <= w <= _MAX_WIDTH and _MIN_HEIGHT <= h <= _MAX_HEIGHT):
+                return (
+                    f"\u274c Size out of range "
+                    f"({_MIN_WIDTH}\u2013{_MAX_WIDTH} x {_MIN_HEIGHT}\u2013{_MAX_HEIGHT})",
+                    _kb_out(self.cfg),
+                )
             self.cfg.output.video.width = w
             self.cfg.output.video.height = h
             await self.manager.reload_compositor()
@@ -839,20 +1042,37 @@ class TelegramBot:
             )
 
         if sub in ("pos", "position"):
-            coords = arg_str[len(sub):].strip()
-            if not coords:
-                return "Usage: /placeholder pos <x>,<y>  (0,0 = center)"
-            parts = coords.replace(" ", "").split(",")
-            if len(parts) != 2:
-                return "\u274c Format: <code>x,y</code>"
-            try:
-                x, y = int(parts[0]), int(parts[1])
-            except ValueError:
-                return "\u274c Coordinates must be integers"
-            self.cfg.placeholder.x = x
-            self.cfg.placeholder.y = y
-            await self.manager.reload_compositor()
-            return f"\u2705 Text position: ({x},{y})"
+            val = arg_str[len(sub):].strip()
+            if not val:
+                presets = ", ".join(
+                    p for p in POSITION_PRESETS if p != "custom"
+                )
+                return (
+                    "Usage: /placeholder pos <preset>\n"
+                    f"Presets: {presets}\n"
+                    "Or: /placeholder pos custom <x>,<y>"
+                )
+            if val in POSITION_PRESETS and val != "custom":
+                self.cfg.placeholder.text_position = val
+                await self.manager.reload_compositor()
+                return f"\u2705 Text position: {val}"
+            if val == "custom" or "," in val:
+                coords = val.replace("custom", "").strip().strip(",").strip()
+                if not coords:
+                    return "Usage: /placeholder pos custom <x>,<y>"
+                parts = coords.replace(" ", "").split(",")
+                if len(parts) != 2:
+                    return "\u274c Format: <code>x,y</code>"
+                try:
+                    x, y = int(parts[0]), int(parts[1])
+                except ValueError:
+                    return "\u274c Coordinates must be integers"
+                self.cfg.placeholder.text_position = "custom"
+                self.cfg.placeholder.x = x
+                self.cfg.placeholder.y = y
+                await self.manager.reload_compositor()
+                return f"\u2705 Text position: custom ({x},{y})"
+            return f"\u274c Unknown position: <code>{val}</code>"
 
         return f"\u2753 Unknown: /placeholder {sub}"
 
@@ -894,14 +1114,41 @@ class TelegramBot:
             await self.manager.reload_compositor()
             return f"\u2705 Overlay \u2192 image: <code>{path}</code>"
 
-        if sub == "x":
-            return await _set_int(
-                args, self.cfg.overlay, "x", reload_fn, "Overlay X",
-            )
-        if sub == "y":
-            return await _set_int(
-                args, self.cfg.overlay, "y", reload_fn, "Overlay Y",
-            )
+        if sub in ("pos", "position"):
+            val = arg_str[len(sub):].strip()
+            if not val:
+                presets = ", ".join(
+                    p for p in POSITION_PRESETS if p != "custom"
+                )
+                return (
+                    "Usage: /overlay pos <preset>\n"
+                    f"Presets: {presets}\n"
+                    "Or: /overlay pos custom <x>,<y>"
+                )
+            if val in POSITION_PRESETS and val != "custom":
+                self.cfg.overlay.position = val
+                if self.cfg.overlay.enabled:
+                    await self.manager.reload_compositor()
+                return f"\u2705 Overlay position: {val}"
+            if val == "custom" or "," in val:
+                coords = val.replace("custom", "").strip().strip(",").strip()
+                if not coords:
+                    return "Usage: /overlay pos custom <x>,<y>"
+                parts = coords.replace(" ", "").split(",")
+                if len(parts) != 2:
+                    return "\u274c Format: <code>x,y</code>"
+                try:
+                    x, y = int(parts[0]), int(parts[1])
+                except ValueError:
+                    return "\u274c Coordinates must be integers"
+                self.cfg.overlay.position = "custom"
+                self.cfg.overlay.x = x
+                self.cfg.overlay.y = y
+                if self.cfg.overlay.enabled:
+                    await self.manager.reload_compositor()
+                return f"\u2705 Overlay position: custom ({x},{y})"
+            return f"\u274c Unknown position: <code>{val}</code>"
+
         if sub == "opacity":
             return await _set_float(
                 args, self.cfg.overlay, "opacity",
@@ -974,26 +1221,30 @@ class TelegramBot:
         if sub == "bitrate":
             if len(args) < 2:
                 return "Usage: /output bitrate <value>"
-            val = args[1].lower()
-            if not _is_valid_bitrate(val):
-                return "\u274c Invalid bitrate (e.g. 6000k, 8M)"
-            self.cfg.output.video.bitrate = val
+            normalized = _normalize_bitrate(" ".join(args[1:]))
+            if not normalized:
+                return (
+                    "\u274c Invalid bitrate.\n"
+                    f"Examples: 6000, 6000k, 8m\n"
+                    f"Range: {_MIN_BITRATE_KBPS}k\u2013{_MAX_BITRATE_KBPS}k"
+                )
+            self.cfg.output.video.bitrate = normalized
             await self.manager.reload_compositor()
-            return f"\u2705 Bitrate \u2192 {val}"
+            return f"\u2705 Bitrate \u2192 {normalized}"
 
         if sub == "fps":
             if len(args) < 2:
                 return "Usage: /output fps <n>"
             try:
                 fps = int(args[1])
-                if not 1 <= fps <= 120:
+                if not _MIN_FPS <= fps <= _MAX_FPS:
                     raise ValueError
                 self.cfg.output.video.fps = fps
                 self.cfg.output.video.gop = fps * 2
                 await self.manager.reload_compositor()
                 return f"\u2705 FPS \u2192 {fps} (gop={fps * 2})"
             except ValueError:
-                return "\u274c FPS must be 1\u2013120"
+                return f"\u274c FPS must be {_MIN_FPS}\u2013{_MAX_FPS}"
 
         if sub == "size":
             if len(args) < 2:
@@ -1001,14 +1252,19 @@ class TelegramBot:
             try:
                 w_s, h_s = args[1].lower().split("x")
                 w, h = int(w_s), int(h_s)
-                if not (160 <= w <= 7680 and 90 <= h <= 4320):
+                if not (_MIN_WIDTH <= w <= _MAX_WIDTH
+                        and _MIN_HEIGHT <= h <= _MAX_HEIGHT):
                     raise ValueError
                 self.cfg.output.video.width = w
                 self.cfg.output.video.height = h
                 await self.manager.reload_compositor()
                 return f"\u2705 Size \u2192 {w}\u00d7{h}"
             except (ValueError, TypeError):
-                return "\u274c Format: WxH (e.g. 1920x1080)"
+                return (
+                    "\u274c Format: WxH (e.g. 1920x1080)\n"
+                    f"Range: {_MIN_WIDTH}\u2013{_MAX_WIDTH} x "
+                    f"{_MIN_HEIGHT}\u2013{_MAX_HEIGHT}"
+                )
 
         if sub == "preset":
             if len(args) < 2 or args[1] not in _X264_PRESETS:
@@ -1064,8 +1320,10 @@ class TelegramBot:
             ph_desc += f": <code>{os.path.basename(ph.path)}</code>"
         if ph.text:
             ph_desc += f"\n  text: <code>{ph.text}</code>"
-            if ph.x or ph.y:
-                ph_desc += f" at ({ph.x},{ph.y})"
+            pos_str = ph.text_position
+            if pos_str == "custom":
+                pos_str += f" ({ph.x},{ph.y})"
+            ph_desc += f" [{pos_str}]"
         if ph.opacity < 1.0:
             ph_desc += f" opacity={ph.opacity:.2f}"
 
@@ -1075,7 +1333,10 @@ class TelegramBot:
                 if ov.type == "text"
                 else f"image <code>{os.path.basename(ov.path or '')}</code>"
             )
-            ov_desc += f" at ({ov.x},{ov.y})"
+            pos_str = ov.position
+            if pos_str == "custom":
+                pos_str += f" ({ov.x},{ov.y})"
+            ov_desc += f" [{pos_str}]"
             if ov.opacity < 1.0:
                 ov_desc += f" opacity={ov.opacity:.2f}"
         else:
@@ -1104,10 +1365,31 @@ class TelegramBot:
         if ph.path:
             desc += f"\nFile: <code>{os.path.basename(ph.path)}</code>"
         if ph.text:
-            desc += f"\nText overlay: <code>{ph.text}</code>"
-            if ph.x or ph.y:
-                desc += f" at ({ph.x},{ph.y})"
+            desc += f"\nText: <code>{ph.text}</code>"
         desc += f"\nOpacity: {ph.opacity:.2f}"
+        return desc
+
+    def _text_ph_text(self) -> str:
+        ph = self.cfg.placeholder
+        if ph.text:
+            desc = f"\U0001f4dd <b>Placeholder Text</b>\n"
+            desc += f"Text: <code>{ph.text}</code>\n"
+            desc += f"Size: {ph.font_size}px | Color: {ph.font_color}\n"
+            desc += f"Position: {ph.text_position}"
+            if ph.text_position == "custom":
+                desc += f" ({ph.x},{ph.y})"
+            desc += f"\nOpacity: {ph.opacity:.2f}"
+            if ph.font_path:
+                desc += f"\nFont: <code>{os.path.basename(ph.font_path)}</code>"
+        else:
+            desc = "\U0001f4dd <b>Placeholder Text</b>\nNo text configured"
+        return desc
+
+    def _text_ph_pos(self) -> str:
+        ph = self.cfg.placeholder
+        desc = f"\U0001f4cd <b>Text Position</b>\nCurrent: {ph.text_position}"
+        if ph.text_position == "custom":
+            desc += f" ({ph.x},{ph.y})"
         return desc
 
     def _text_ov(self) -> str:
@@ -1119,10 +1401,35 @@ class TelegramBot:
                 desc += f"\nType: text \u2014 <code>{ov.text}</code>"
             else:
                 desc += f"\nType: image \u2014 <code>{os.path.basename(ov.path or '')}</code>"
-            desc += f"\nPosition: ({ov.x}, {ov.y})"
+            desc += f"\nPosition: {ov.position}"
+            if ov.position == "custom":
+                desc += f" ({ov.x},{ov.y})"
             desc += f"\nOpacity: {ov.opacity:.2f}"
             if ov.type == "text":
                 desc += f"\nFont: {ov.font_size}px {ov.font_color}"
+        return desc
+
+    def _text_ov_text(self) -> str:
+        ov = self.cfg.overlay
+        desc = f"\U0001f4dd <b>Overlay Text</b>\n"
+        if ov.text:
+            desc += f"Text: <code>{ov.text}</code>\n"
+        else:
+            desc += "Text: (not set)\n"
+        desc += f"Size: {ov.font_size}px | Color: {ov.font_color}\n"
+        desc += f"Position: {ov.position}"
+        if ov.position == "custom":
+            desc += f" ({ov.x},{ov.y})"
+        desc += f"\nOpacity: {ov.opacity:.2f}"
+        if ov.font_path:
+            desc += f"\nFont: <code>{os.path.basename(ov.font_path)}</code>"
+        return desc
+
+    def _text_ov_pos(self) -> str:
+        ov = self.cfg.overlay
+        desc = f"\U0001f4cd <b>Overlay Position</b>\nCurrent: {ov.position}"
+        if ov.position == "custom":
+            desc += f" ({ov.x},{ov.y})"
         return desc
 
     def _text_targets(self) -> str:
@@ -1194,7 +1501,7 @@ def _kb_status():
 def _kb_ph(cfg: Config):
     ph = cfg.placeholder
     check = lambda t: " \u2705" if ph.type == t else ""
-    text_label = "\U0001f4dd Text \u2705" if ph.text else "\U0001f4dd Text"
+    text_label = "\U0001f4dd Text \u25b8" if ph.text else "\U0001f4dd Text \u25b8"
     rows = [
         [
             _btn(f"\u2b1b Black{check('black')}", "ph:black"),
@@ -1205,15 +1512,61 @@ def _kb_ph(cfg: Config):
             _btn(f"\U0001f3ac Video{check('video')}", "ph:video"),
         ],
         [
-            _btn(text_label, "ph:text"),
+            _btn(text_label, "phtxt:menu"),
             _btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "ph:opacity"),
-        ],
-        [
-            _btn(f"\U0001f4cd Position ({ph.x},{ph.y})", "ph:pos"),
         ],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
     ]
     return rows
+
+
+def _kb_ph_text(cfg: Config):
+    ph = cfg.placeholder
+    rows = [
+        [
+            _btn("\u270f\ufe0f Content", "phtxt:content"),
+            _btn("\u274c Remove", "phtxt:off"),
+        ],
+        [
+            _btn(f"\U0001f524 Size ({ph.font_size})", "phtxt:size"),
+            _btn(f"\U0001f3a8 Color ({ph.font_color})", "phtxt:color"),
+        ],
+        [
+            _btn(
+                f"\U0001f4cd Position ({ph.text_position})",
+                "phtxt:pos",
+            ),
+        ],
+        [
+            _btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "phtxt:opacity"),
+            _btn("\U0001f4c1 Font", "phtxt:font"),
+        ],
+        [_btn("\u25c0\ufe0f Placeholder", "ph:menu")],
+    ]
+    return rows
+
+
+def _kb_position(prefix: str):
+    """Position preset keyboard. prefix is 'phpos' or 'ovpos'."""
+    return [
+        [
+            _btn("\u2196 TL", f"{prefix}:top-left"),
+            _btn("\u2b06\ufe0f TC", f"{prefix}:top-center"),
+            _btn("\u2197 TR", f"{prefix}:top-right"),
+        ],
+        [
+            _btn("\u2b05\ufe0f L", f"{prefix}:left"),
+            _btn("\u23fa C", f"{prefix}:center"),
+            _btn("\u27a1\ufe0f R", f"{prefix}:right"),
+        ],
+        [
+            _btn("\u2199 BL", f"{prefix}:bottom-left"),
+            _btn("\u2b07\ufe0f BC", f"{prefix}:bottom-center"),
+            _btn("\u2198 BR", f"{prefix}:bottom-right"),
+        ],
+        [_btn("\U0001f4d0 Custom x,y", f"{prefix}:custom")],
+        [_btn("\u25c0\ufe0f Back", f"{prefix.replace('pos', '')}txt:menu" if "pos" in prefix else "menu:main")],
+    ]
 
 
 def _kb_ov(cfg: Config):
@@ -1226,18 +1579,37 @@ def _kb_ov(cfg: Config):
     return [
         [toggle],
         [
-            _btn("\U0001f4dd Text", "ov:text"),
+            _btn("\U0001f4dd Text \u25b8", "ovtxt:menu"),
             _btn("\U0001f5bc Image", "ov:image"),
         ],
         [
-            _btn(f"\U0001f4cd Pos ({ov.x},{ov.y})", "ov:pos"),
-            _btn(f"\U0001f4a7 Opac ({ov.opacity:.1f})", "ov:opacity"),
-        ],
-        [
-            _btn(f"\U0001f524 Size ({ov.font_size})", "ov:size"),
-            _btn(f"\U0001f3a8 Color ({ov.font_color})", "ov:color"),
+            _btn(f"\U0001f4a7 Opacity ({ov.opacity:.1f})", "ov:opacity"),
         ],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
+    ]
+
+
+def _kb_ov_text(cfg: Config):
+    ov = cfg.overlay
+    return [
+        [
+            _btn("\u270f\ufe0f Content", "ovtxt:content"),
+        ],
+        [
+            _btn(f"\U0001f524 Size ({ov.font_size})", "ovtxt:size"),
+            _btn(f"\U0001f3a8 Color ({ov.font_color})", "ovtxt:color"),
+        ],
+        [
+            _btn(
+                f"\U0001f4cd Position ({ov.position})",
+                "ovtxt:pos",
+            ),
+        ],
+        [
+            _btn(f"\U0001f4a7 Opacity ({ov.opacity:.1f})", "ovtxt:opacity"),
+            _btn("\U0001f4c1 Font", "ovtxt:font"),
+        ],
+        [_btn("\u25c0\ufe0f Overlay", "ov:menu")],
     ]
 
 
@@ -1300,9 +1672,54 @@ def _is_valid_rtmp_url(url: str) -> bool:
     return bool(re.match(r"^rtmps?://\S+", url))
 
 
-def _is_valid_bitrate(val: str) -> bool:
-    """Validate bitrate format like '6000k', '8M', '4500000'."""
-    return bool(re.match(r"^\d+[kKmM]?$", val.strip()))
+def _normalize_bitrate(raw: str) -> Optional[str]:
+    """Normalize bitrate input to 'NNNNk' or 'Nm'.
+
+    Accepts: '6000', '6000k', '6000 k', '6M', '6 m', '6000K'.
+    Bare numbers are assumed kbps.
+    Returns normalized string or None if invalid.
+    """
+    val = raw.strip().lower().replace(" ", "")
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([km]?)$", val)
+    if not m:
+        return None
+    num_str, suffix = m.group(1), m.group(2)
+    num = float(num_str)
+    if num <= 0:
+        return None
+    if not suffix:
+        suffix = "k"
+    # Validate against platform limits (500k - 51000k)
+    kbps = num if suffix == "k" else num * 1000
+    if not (500 <= kbps <= 51000):
+        return None
+    if "." in num_str:
+        return f"{num:g}{suffix}"
+    return f"{int(num)}{suffix}"
+
+
+# Platform-safe limits for the Telegram bot validation.
+# These are the union of YouTube/Twitch/Telegram Live limits.
+_MIN_BITRATE_KBPS = 500
+_MAX_BITRATE_KBPS = 51000
+_MIN_FPS = 1
+_MAX_FPS = 60
+_MIN_WIDTH = 160
+_MAX_WIDTH = 3840
+_MIN_HEIGHT = 120
+_MAX_HEIGHT = 2160
+
+
+def _position_label(pos: str) -> str:
+    """Short emoji label for a position preset."""
+    labels = {
+        "top-left": "\u2196", "top-center": "\u2b06\ufe0f",
+        "top-right": "\u2197", "left": "\u2b05\ufe0f",
+        "center": "\u23fa", "right": "\u27a1\ufe0f",
+        "bottom-left": "\u2199", "bottom-center": "\u2b07\ufe0f",
+        "bottom-right": "\u2198", "custom": "\U0001f4d0",
+    }
+    return labels.get(pos, pos)
 
 
 def _short_url(url: str) -> str:
