@@ -105,8 +105,8 @@ def _gen_config_v1(cfg: Config) -> str:
         "webrtc: false\n"
         "\n"
         "pathDefaults:\n"
-        f'  runOnPublish: curl -sf -X POST http://127.0.0.1:{hook_port}/on_publish -d \'{{"path":"$MTX_PATH","conn_type":"$MTX_SOURCE_TYPE","conn_id":"$MTX_SOURCE_ID"}}\' -H "Content-Type: application/json"\n'
-        f'  runOnUnpublish: curl -sf -X POST http://127.0.0.1:{hook_port}/on_unpublish -d \'{{"path":"$MTX_PATH"}}\' -H "Content-Type: application/json"\n'
+        f'  runOnPublish: "curl -sf -X POST http://127.0.0.1:{hook_port}/on_publish -d \'{{\\\"path\\\":\\\"$MTX_PATH\\\",\\\"conn_type\\\":\\\"$MTX_SOURCE_TYPE\\\",\\\"conn_id\\\":\\\"$MTX_SOURCE_ID\\\"}}\' -H \'Content-Type: application/json\'"\n'
+        f'  runOnUnpublish: "curl -sf -X POST http://127.0.0.1:{hook_port}/on_unpublish -d \'{{\\\"path\\\":\\\"$MTX_PATH\\\"}}\' -H \'Content-Type: application/json\'"\n'
         "paths:\n"
         "  all_others:\n"
     )
@@ -138,8 +138,8 @@ def _gen_config_v0(cfg: Config) -> str:
         "\n"
         "paths:\n"
         "  all:\n"
-        f'    runOnPublish: curl -sf -X POST http://127.0.0.1:{hook_port}/on_publish -d \'{{"path":"$RTSP_PATH","conn_type":"$RTSP_SOURCE_TYPE","conn_id":"$RTSP_SOURCE_ID"}}\' -H "Content-Type: application/json"\n'
-        f'    runOnUnpublish: curl -sf -X POST http://127.0.0.1:{hook_port}/on_unpublish -d \'{{"path":"$RTSP_PATH"}}\' -H "Content-Type: application/json"\n'
+        f'    runOnPublish: "curl -sf -X POST http://127.0.0.1:{hook_port}/on_publish -d \'{{\\\"path\\\":\\\"$RTSP_PATH\\\",\\\"conn_type\\\":\\\"$RTSP_SOURCE_TYPE\\\",\\\"conn_id\\\":\\\"$RTSP_SOURCE_ID\\\"}}\' -H \'Content-Type: application/json\'"\n'
+        f'    runOnUnpublish: "curl -sf -X POST http://127.0.0.1:{hook_port}/on_unpublish -d \'{{\\\"path\\\":\\\"$RTSP_PATH\\\"}}\' -H \'Content-Type: application/json\'"\n'
     )
 
 
