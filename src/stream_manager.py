@@ -1,13 +1,15 @@
 """
 Stream state manager — orchestrates compositor and output FFmpeg processes.
 
-Stream detection: polls the mediamtx HTTP API every second.
-This avoids runOnPublish/runOnUnpublish hook compatibility issues.
+Stream detection: mediamtx runOnPublish/runOnUnpublish hooks POST to an
+internal HTTP server, providing near-instant event delivery.
 
 Architecture:
   External stream -> mediamtx (/live/KEY or /live)
-                         | API poll (every 1 s)
-                    StreamManager
+                         | hook POST (instant)
+                    StreamManager._hook_server
+                         | asyncio.Queue (serialized)
+                    StreamManager._event_worker
                          | manages
                     Compositor FFmpeg --UDP/MPEG-TS--> Output FFmpeg -> targets
 
@@ -23,23 +25,23 @@ Redundancy:
   next available source; the output FFmpeg connection is never interrupted.
 """
 import asyncio
+import http.server
 import json
 import logging
 import os
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 from config import Config
-from ffmpeg_cmd import build_compositor_idle, build_compositor_live, build_output, file_has_audio
+from ffmpeg_cmd import (
+    build_compositor_idle, build_compositor_live, build_compositor_audio_only,
+    build_output, file_has_audio,
+)
 
 log = logging.getLogger("stream_manager")
 
 PROBE_TIMEOUT = 8.0       # seconds to wait for ffprobe
-COMPOSITOR_GRACE = 2.0    # seconds for new compositor to connect before killing old
-POLL_INTERVAL = 1.0       # seconds between mediamtx API polls
 OUTPUT_RETRY_LIMIT = 3    # max retries for output FFmpeg quick failures
 OUTPUT_QUICK_FAIL = 15.0  # seconds — if output exits faster than this, it's a quick fail
 
@@ -69,10 +71,13 @@ class StreamManager:
         self._current_stream: Optional[StreamInfo] = None
         self._lock = asyncio.Lock()
         self._running = False
-        # Paths currently known to have an active publisher (from API poll)
-        self._known_active: Dict[str, str] = {}   # path -> conn_id
         # All fully-probed active streams, including standby sources
         self._active_streams: Dict[str, StreamInfo] = {}  # path -> StreamInfo
+        # Event queue serializes hook callbacks to avoid race conditions
+        self._event_queue: asyncio.Queue = asyncio.Queue()
+        # Managed background tasks (stored to prevent GC and catch exceptions)
+        self._tasks: List[asyncio.Task] = []
+        self._hook_server: Optional[asyncio.Server] = None
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -89,11 +94,20 @@ class StreamManager:
         await self._start_compositor_idle()
         log.info("Starting output FFmpeg (persistent)")
         await self._start_output()
-        asyncio.create_task(self._poll_loop())
-        asyncio.create_task(self._watchdog())
+        await self._start_hook_server()
+        self._spawn_task(self._event_worker(), "event-worker")
+        self._spawn_task(self._watchdog(), "watchdog")
 
     async def stop(self) -> None:
         self._running = False
+        if self._hook_server:
+            self._hook_server.close()
+            await self._hook_server.wait_closed()
+            self._hook_server = None
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
         for proc in (self._compositor, self._output):
             if proc and proc.returncode is None:
                 proc.terminate()
@@ -103,12 +117,16 @@ class StreamManager:
                     proc.kill()
 
     async def pause_all(self) -> None:
-        """Stop compositor & output, pause polling and watchdog.
+        """Stop compositor & output, pause event processing and watchdog.
 
         The service enters a fully stopped state.  Use resume_all() to
         restart everything.
         """
         self._running = False
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
         await self._terminate_process(self._output)
         self._output = None
         await self._terminate_process(self._compositor)
@@ -116,107 +134,137 @@ class StreamManager:
         log.info("All processes paused")
 
     async def resume_all(self) -> None:
-        """Restart compositor, output, polling and watchdog."""
+        """Restart compositor, output, event processing and watchdog."""
         self._running = True
         if self._current_stream:
             await self._start_compositor_live(self._current_stream)
         else:
             await self._start_compositor_idle()
         await self._start_output()
-        asyncio.create_task(self._poll_loop())
-        asyncio.create_task(self._watchdog())
+        self._spawn_task(self._event_worker(), "event-worker")
+        self._spawn_task(self._watchdog(), "watchdog")
         log.info("All processes resumed")
 
+    def _spawn_task(self, coro, name: str) -> asyncio.Task:
+        """Create a tracked background task with exception logging."""
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.append(task)
+        task.add_done_callback(self._on_task_done)
+        return task
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        self._tasks = [t for t in self._tasks if t is not task]
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            log.error("Background task %r crashed: %s", task.get_name(), exc)
+
     # ------------------------------------------------------------------ #
-    #  mediamtx API polling — stream detection                            #
+    #  Hook HTTP server — receives mediamtx runOnPublish/runOnUnpublish   #
     # ------------------------------------------------------------------ #
 
-    async def _poll_loop(self) -> None:
-        """Poll the mediamtx paths API every POLL_INTERVAL seconds.
+    async def _start_hook_server(self) -> None:
+        """Start a minimal HTTP server for mediamtx hooks."""
+        loop = asyncio.get_event_loop()
 
-        Tries /v3/paths/list first (mediamtx v1.x); falls back to
-        /v1/paths/list (rtsp-simple-server / mediamtx v0.x) on 404.
-        """
-        base = f"http://127.0.0.1:{self.cfg.mediamtx_api_port}"
-        api_url = f"{base}/v3/paths/list"
-
-        while self._running:
-            await asyncio.sleep(POLL_INTERVAL)
+        async def _handle_request(reader, writer):
             try:
-                raw = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: urllib.request.urlopen(api_url, timeout=2).read(),
-                )
-                data = json.loads(raw)
-            except urllib.error.HTTPError as e:
-                if e.code == 404 and "v3" in api_url:
-                    api_url = f"{base}/v1/paths/list"
-                    log.info("mediamtx API v3 not found, switched to v1")
-                else:
-                    log.debug("mediamtx API poll error: %s", e)
-                continue
-            except Exception as e:
-                log.debug("mediamtx API poll error: %s", e)
-                continue
-
-            active_now = self._normalize_api_response(data)
-            self._process_stream_changes(active_now)
-
-    def _normalize_api_response(self, data: dict) -> Dict[str, dict]:
-        """Normalise both v0 (dict) and v1 (list) mediamtx API formats
-        into a unified {path: {conn_type, conn_id, remote_addr}} dict."""
-        result: Dict[str, dict] = {}
-        raw_items = data.get("items", [])
-
-        if isinstance(raw_items, dict):
-            # v0.x: {"path_name": {"sourceReady": true, "source": {...}}}
-            for path_name, item in raw_items.items():
-                if not self._is_ingest_path(path_name):
-                    continue
-                is_ready = item.get("sourceReady") or (
-                    item.get("ready") and item.get("source")
-                )
-                if is_ready:
-                    src = item.get("source") or {}
-                    result[path_name] = {
-                        "conn_type": src.get("type", "unknown"),
-                        "conn_id": src.get("id", ""),
-                        "remote_addr": _extract_remote_addr(src),
-                    }
-        else:
-            # v1.x: [{"name": "...", "ready": true, "source": {...}}]
-            for item in raw_items:
-                path_name = item.get("name", "")
-                if not self._is_ingest_path(path_name):
-                    continue
-                if item.get("ready") and item.get("source"):
-                    src = item["source"]
-                    result[path_name] = {
-                        "conn_type": src.get("type", "unknown"),
-                        "conn_id": src.get("id", ""),
-                        "remote_addr": _extract_remote_addr(src),
-                    }
-
-        return result
-
-    def _process_stream_changes(self, active_now: Dict[str, dict]) -> None:
-        """Detect new and stopped streams, dispatch handlers."""
-        # New streams
-        for path, info in active_now.items():
-            if path not in self._known_active:
-                self._known_active[path] = info["conn_id"]
-                asyncio.create_task(
-                    self.on_stream_start(
-                        path, info["conn_type"], info["conn_id"],
-                        info["remote_addr"],
+                raw = b""
+                # Read HTTP request line + headers
+                while True:
+                    line = await asyncio.wait_for(
+                        reader.readline(), timeout=5
                     )
-                )
+                    raw += line
+                    if line == b"\r\n" or line == b"\n" or not line:
+                        break
 
-        # Stopped streams
-        for path in list(self._known_active):
-            if path not in active_now:
-                conn_id = self._known_active.pop(path)
-                asyncio.create_task(self.on_stream_stop(path, conn_id))
+                request_line = raw.split(b"\r\n")[0].decode(errors="replace")
+                parts = request_line.split()
+                method = parts[0] if parts else ""
+                path = parts[1] if len(parts) > 1 else ""
+
+                # Parse Content-Length
+                content_length = 0
+                for header_line in raw.decode(errors="replace").split("\r\n"):
+                    if header_line.lower().startswith("content-length:"):
+                        content_length = int(header_line.split(":", 1)[1].strip())
+
+                body = b""
+                if content_length > 0:
+                    body = await asyncio.wait_for(
+                        reader.readexactly(content_length), timeout=5
+                    )
+
+                status = "200 OK"
+                if method == "POST" and path in ("/on_publish", "/on_unpublish"):
+                    try:
+                        data = json.loads(body) if body else {}
+                        event_type = "publish" if path == "/on_publish" else "unpublish"
+                        await self._event_queue.put((event_type, data))
+                        log.debug("Hook event queued: %s %s", event_type, data)
+                    except json.JSONDecodeError:
+                        status = "400 Bad Request"
+                        log.warning("Hook: invalid JSON body")
+                else:
+                    status = "404 Not Found"
+
+                response = (
+                    f"HTTP/1.1 {status}\r\n"
+                    f"Content-Length: 0\r\n"
+                    f"Connection: close\r\n"
+                    f"\r\n"
+                )
+                writer.write(response.encode())
+                await writer.drain()
+            except Exception as e:
+                log.debug("Hook request error: %s", e)
+            finally:
+                writer.close()
+
+        port = self.cfg.hook_server_port
+        self._hook_server = await asyncio.start_server(
+            _handle_request, "127.0.0.1", port,
+        )
+        log.info("Hook server listening on 127.0.0.1:%d", port)
+
+    # ------------------------------------------------------------------ #
+    #  Event worker — serialized processing of hook events                #
+    # ------------------------------------------------------------------ #
+
+    async def _event_worker(self) -> None:
+        """Process stream events from the queue serially.
+
+        Serialization through a single worker eliminates race conditions
+        between concurrent publish/unpublish events.
+        """
+        while self._running:
+            try:
+                event_type, data = await asyncio.wait_for(
+                    self._event_queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            path = data.get("path", "")
+            if not self._is_ingest_path(path):
+                log.debug("Ignoring non-ingest hook event for path=%s", path)
+                continue
+
+            try:
+                if event_type == "publish":
+                    conn_type = data.get("conn_type", "unknown")
+                    conn_id = data.get("conn_id", "")
+                    remote_addr = _extract_remote_addr_from_id(conn_id)
+                    await self._on_stream_start(
+                        path, conn_type, conn_id, remote_addr
+                    )
+                elif event_type == "unpublish":
+                    await self._on_stream_stop(path)
+            except Exception:
+                log.exception("Error processing %s event for path=%s",
+                              event_type, path)
 
     def _is_ingest_path(self, name: str) -> bool:
         """True for paths that correspond to external ingest streams."""
@@ -269,7 +317,7 @@ class StreamManager:
     #  Stream state transitions                                            #
     # ------------------------------------------------------------------ #
 
-    async def on_stream_start(
+    async def _on_stream_start(
         self, path: str, conn_type: str, conn_id: str,
         remote_addr: str = "unknown",
     ) -> None:
@@ -311,14 +359,19 @@ class StreamManager:
             # This is the best available stream — switch compositor to it
             old_stream = self._current_stream
             self._current_stream = info
-            await self._start_compositor_live(info)
+
+            if info.has_audio and not info.has_video:
+                # Audio-only: keep placeholder video, use incoming audio
+                await self._start_compositor_audio_only(info)
+            else:
+                await self._start_compositor_live(info)
 
             if old_stream:
                 self._notify_preemption(old_stream, info, remote_addr, conn_type)
             else:
                 self._notify_stream_started(info, conn_id)
 
-    async def on_stream_stop(self, path: str, conn_id: str) -> None:
+    async def _on_stream_stop(self, path: str) -> None:
         async with self._lock:
             self._active_streams.pop(path, None)
 
@@ -340,7 +393,10 @@ class StreamManager:
             if next_path and next_path in self._active_streams:
                 next_info = self._active_streams[next_path]
                 self._current_stream = next_info
-                await self._start_compositor_live(next_info)
+                if next_info.has_audio and not next_info.has_video:
+                    await self._start_compositor_audio_only(next_info)
+                else:
+                    await self._start_compositor_live(next_info)
                 log.info(
                     "Failover: %s -> %s (was active %ds)",
                     path, next_path, duration,
@@ -365,6 +421,24 @@ class StreamManager:
                     f"Duration: {_fmt_duration(duration)}\n"
                     "Switched to placeholder"
                 )
+
+    # ------------------------------------------------------------------ #
+    #  Public API (called by Telegram bot, keep signatures compatible)     #
+    # ------------------------------------------------------------------ #
+
+    async def on_stream_start(
+        self, path: str, conn_type: str, conn_id: str,
+        remote_addr: str = "unknown",
+    ) -> None:
+        """Public wrapper — enqueue a publish event."""
+        await self._event_queue.put(("publish", {
+            "path": path, "conn_type": conn_type,
+            "conn_id": conn_id,
+        }))
+
+    async def on_stream_stop(self, path: str, conn_id: str = "") -> None:
+        """Public wrapper — enqueue an unpublish event."""
+        await self._event_queue.put(("unpublish", {"path": path}))
 
     # ------------------------------------------------------------------ #
     #  Notification helpers                                                #
@@ -433,7 +507,11 @@ class StreamManager:
         """Restart compositor with current config (placeholder/overlay changed)."""
         async with self._lock:
             if self._current_stream:
-                await self._start_compositor_live(self._current_stream)
+                info = self._current_stream
+                if info.has_audio and not info.has_video:
+                    await self._start_compositor_audio_only(info)
+                else:
+                    await self._start_compositor_live(info)
             else:
                 await self._start_compositor_idle()
 
@@ -471,10 +549,28 @@ class StreamManager:
             return
         await self._replace_compositor(cmd, f"LIVE({info.path})")
 
+    async def _start_compositor_audio_only(self, info: StreamInfo) -> None:
+        """Audio-only mode: placeholder video + incoming audio."""
+        try:
+            ph = self.cfg.placeholder
+            ph_has_audio = (
+                await file_has_audio(ph.path)
+                if ph.type == "video" and ph.path
+                else False
+            )
+            cmd = build_compositor_audio_only(
+                self.cfg, info.path, video_has_audio=ph_has_audio,
+            )
+        except Exception as e:
+            log.error("Failed to build audio-only compositor: %s", e)
+            self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
+            return
+        await self._replace_compositor(cmd, f"AUDIO({info.path})")
+
     async def _replace_compositor(self, cmd: list, label: str) -> None:
         """Replace the running compositor with a new one.
 
-        The compositor→output link uses UDP/MPEG-TS which is
+        The compositor->output link uses UDP/MPEG-TS which is
         connectionless.  The output FFmpeg simply pauses when no
         packets arrive, then resumes when the new compositor starts
         sending.  No output restart is needed.
@@ -500,8 +596,9 @@ class StreamManager:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        asyncio.create_task(
-            _log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING)
+        self._spawn_task(
+            _log_stderr(new_proc, f"compositor[{label}]", level=logging.WARNING),
+            f"stderr-compositor-{label}",
         )
         self._compositor = new_proc
         log.info("Compositor switched to [%s]", label)
@@ -536,8 +633,9 @@ class StreamManager:
                 stderr=asyncio.subprocess.PIPE,
             )
             self._output = proc
-            asyncio.create_task(
-                _log_stderr(proc, "output", level=logging.WARNING)
+            self._spawn_task(
+                _log_stderr(proc, "output", level=logging.WARNING),
+                f"stderr-output-{retry}",
             )
 
             # Check for quick failure (exits within OUTPUT_QUICK_FAIL seconds)
@@ -590,7 +688,7 @@ class StreamManager:
             if compositor_crashed:
                 rc = self._compositor.returncode
                 log.warning("Compositor exited (code %d) — restarting", rc)
-                # Lock prevents race with on_stream_start/stop and
+                # Lock prevents race with _on_stream_start/stop and
                 # reload_compositor running concurrently.
                 async with self._lock:
                     # Re-check after acquiring lock — another task may
@@ -598,8 +696,11 @@ class StreamManager:
                     if (self._compositor is not None
                             and self._compositor.returncode is not None):
                         if self._current_stream:
-                            await self._start_compositor_live(
-                                self._current_stream)
+                            info = self._current_stream
+                            if info.has_audio and not info.has_video:
+                                await self._start_compositor_audio_only(info)
+                            else:
+                                await self._start_compositor_live(info)
                         else:
                             await self._start_compositor_idle()
 
@@ -736,17 +837,16 @@ def _parse_fps(rate: str) -> str:
         return rate
 
 
-def _extract_remote_addr(source: dict) -> str:
-    """Extract the remote IP/address from a mediamtx API source object.
+def _extract_remote_addr_from_id(conn_id: str) -> str:
+    """Extract the remote IP/address from a mediamtx connection ID.
 
-    The source 'id' field typically looks like:
+    The conn_id field typically looks like:
       "rtmpConn 192.168.1.5:52341"   or  "srtConn 10.0.0.1:9999"
     We extract the IP:port part.  Falls back to the raw id or 'unknown'.
     """
-    raw_id = source.get("id", "")
-    if not raw_id:
+    if not conn_id:
         return "unknown"
-    parts = raw_id.split()
+    parts = conn_id.split()
     if len(parts) >= 2:
         return parts[-1]
-    return raw_id
+    return conn_id
