@@ -21,7 +21,7 @@ import re
 import urllib.request
 from typing import Callable, Optional, TYPE_CHECKING
 
-from config import Config, _X264_PRESETS, POSITION_PRESETS
+from config import Config, _X264_PRESETS, POSITION_PRESETS, save_state
 
 if TYPE_CHECKING:
     from stream_manager import StreamManager
@@ -41,9 +41,15 @@ _MAX_VIDEO = 50 * 1024 * 1024      # 50 MB (bot API file limit)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TelegramBot:
-    def __init__(self, cfg: Config, manager: "StreamManager"):
+    def __init__(
+        self,
+        cfg: Config,
+        manager: "StreamManager",
+        state_path: str = "",
+    ):
         self.cfg = cfg
         self.manager = manager
+        self._state_path = state_path
         self._base = f"https://api.telegram.org/bot{cfg.telegram.bot_token}"
         self._chat_id = cfg.telegram.chat_id
         self._running = False
@@ -73,6 +79,29 @@ class TelegramBot:
         exc = task.exception()
         if exc:
             log.error("Bot poll loop crashed: %s", exc)
+
+    # ------------------------------------------------------------------ #
+    #  State persistence helpers                                           #
+    # ------------------------------------------------------------------ #
+
+    def _save_state(self) -> None:
+        """Persist current config to state file (if configured)."""
+        if self._state_path:
+            save_state(self.cfg, self._state_path)
+
+    async def _save_state_async(self) -> None:
+        """Async wrapper for _save_state (used as reload_fn callback)."""
+        self._save_state()
+
+    async def _reload_compositor(self) -> None:
+        """Reload compositor and persist state."""
+        await self._reload_compositor()
+        self._save_state()
+
+    async def _reload_output(self) -> None:
+        """Reload output FFmpeg and persist state."""
+        await self._reload_output()
+        self._save_state()
 
     # ------------------------------------------------------------------ #
     #  Telegram API helpers                                                #
@@ -389,7 +418,7 @@ class TelegramBot:
         if act == "black":
             self.cfg.placeholder.type = "black"
             self.cfg.placeholder.path = None
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return (
                 self._text_ph() + "\n\n\u2705 Black screen",
                 _kb_ph(self.cfg), "Black",
@@ -398,7 +427,7 @@ class TelegramBot:
         if act == "testcard":
             self.cfg.placeholder.type = "testcard"
             self.cfg.placeholder.path = None
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return (
                 self._text_ph() + "\n\n\u2705 Test card",
                 _kb_ph(self.cfg), "Testcard",
@@ -449,7 +478,7 @@ class TelegramBot:
 
         if act == "off":
             self.cfg.placeholder.text = None
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return (
                 self._text_ph_text() + "\n\n\u2705 Text removed",
                 _kb_ph_text(self.cfg), "Removed",
@@ -508,7 +537,7 @@ class TelegramBot:
         # Position preset
         if act in POSITION_PRESETS and act != "custom":
             self.cfg.placeholder.text_position = act
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return (
                 self._text_ph_pos() + f"\n\n\u2705 {act}",
                 _kb_position("phpos"), act,
@@ -524,12 +553,12 @@ class TelegramBot:
 
         if act == "off":
             self.cfg.overlay.enabled = False
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return self._text_ov() + "\n\n\u2705 Disabled", _kb_ov(self.cfg), "Off"
 
         if act == "on":
             self.cfg.overlay.enabled = True
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return self._text_ov() + "\n\n\u2705 Enabled", _kb_ov(self.cfg), "On"
 
         return self._text_ov(), _kb_ov(self.cfg), ""
@@ -553,7 +582,9 @@ class TelegramBot:
         if act == "clear":
             self.cfg.overlay.path = None
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return (
                 self._text_ov_image() + "\n\n\u2705 Image cleared",
                 _kb_ov_image(self.cfg), "Cleared",
@@ -596,7 +627,9 @@ class TelegramBot:
         if act in POSITION_PRESETS and act != "custom":
             self.cfg.overlay.image_position = act
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return (
                 self._text_ov_img_pos() + f"\n\n\u2705 {act}",
                 _kb_position("ovimgpos"), act,
@@ -618,7 +651,9 @@ class TelegramBot:
         if act == "clear":
             self.cfg.overlay.text = None
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return (
                 self._text_ov_text() + "\n\n\u2705 Text cleared",
                 _kb_ov_text(self.cfg), "Cleared",
@@ -677,7 +712,9 @@ class TelegramBot:
         if act in POSITION_PRESETS and act != "custom":
             self.cfg.overlay.text_position = act
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return (
                 self._text_ov_txt_pos() + f"\n\n\u2705 {act}",
                 _kb_position("ovtxtpos"), act,
@@ -701,7 +738,9 @@ class TelegramBot:
             if 0 <= idx < len(self.cfg.output.targets):
                 removed = self.cfg.output.targets.pop(idx)
                 if self.cfg.output.targets:
-                    await self.manager.reload_output()
+                    await self._reload_output()
+                else:
+                    self._save_state()
                 return (
                     self._text_targets()
                     + f"\n\n\u2705 Removed:\n<code>{removed}</code>",
@@ -737,7 +776,7 @@ class TelegramBot:
             preset = act[2:]
             if preset in _X264_PRESETS:
                 self.cfg.output.video.preset = preset
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return (
                     self._text_output() + f"\n\n\u2705 Preset \u2192 {preset}",
                     _kb_out(self.cfg), preset,
@@ -782,10 +821,10 @@ class TelegramBot:
             val = text.strip().strip("\"'")
             if val.lower() == "off":
                 self.cfg.placeholder.text = None
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return "\u2705 Placeholder text removed", _kb_ph_text(self.cfg)
             self.cfg.placeholder.text = val
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return (
                 f"\u2705 Placeholder text:\n<code>{val}</code>",
                 _kb_ph_text(self.cfg),
@@ -797,7 +836,7 @@ class TelegramBot:
                 return f"\u274c File not found: <code>{text}</code>", _kb_ph(self.cfg)
             self.cfg.placeholder.type = kind
             self.cfg.placeholder.path = text
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             label = "\U0001f5bc" if kind == "image" else "\U0001f3ac"
             return (
                 f"\u2705 Placeholder {kind}:\n{label} <code>{text}</code>",
@@ -812,7 +851,7 @@ class TelegramBot:
             if not 0.0 <= v <= 1.0:
                 return "\u274c Must be 0.0\u20131.0", _kb_ph(self.cfg)
             self.cfg.placeholder.opacity = v
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Opacity: {v:.2f}", _kb_ph(self.cfg)
 
         if action == "ph:fontsize":
@@ -823,12 +862,12 @@ class TelegramBot:
             if not 8 <= v <= 500:
                 return "\u274c Font size must be 8\u2013500", _kb_ph_text(self.cfg)
             self.cfg.placeholder.font_size = v
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Font size: {v}px", _kb_ph_text(self.cfg)
 
         if action == "ph:fontcolor":
             self.cfg.placeholder.font_color = text.strip()
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Color: {text.strip()}", _kb_ph_text(self.cfg)
 
         if action == "ph:textopacity":
@@ -839,7 +878,7 @@ class TelegramBot:
             if not 0.0 <= v <= 1.0:
                 return "\u274c Must be 0.0\u20131.0", _kb_ph_text(self.cfg)
             self.cfg.placeholder.opacity = v
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Text opacity: {v:.2f}", _kb_ph_text(self.cfg)
 
         if action == "ph:font":
@@ -850,7 +889,7 @@ class TelegramBot:
                 self.cfg.placeholder.font_path = val
             else:
                 return f"\u274c File not found: <code>{val}</code>", _kb_ph_text(self.cfg)
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Font: {val}", _kb_ph_text(self.cfg)
 
         if action == "ph:custompos":
@@ -864,7 +903,7 @@ class TelegramBot:
             self.cfg.placeholder.text_position = "custom"
             self.cfg.placeholder.x = x
             self.cfg.placeholder.y = y
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Position: ({x},{y})", _kb_position("phpos")
 
         # -- Overlay Image --
@@ -873,7 +912,7 @@ class TelegramBot:
                 return f"\u274c File not found: <code>{text}</code>", _kb_ov_image(self.cfg)
             self.cfg.overlay.enabled = True
             self.cfg.overlay.path = text
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Overlay image:\n<code>{text}</code>", _kb_ov_image(self.cfg)
 
         if action == "ov:imgcustompos":
@@ -888,7 +927,9 @@ class TelegramBot:
             self.cfg.overlay.image_x = x
             self.cfg.overlay.image_y = y
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Position: ({x},{y})", _kb_position("ovimgpos")
 
         if action == "ov:imgopacity":
@@ -900,7 +941,9 @@ class TelegramBot:
                 return "\u274c Must be 0.0\u20131.0", _kb_ov_image(self.cfg)
             self.cfg.overlay.image_opacity = v
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Image opacity: {v:.2f}", _kb_ov_image(self.cfg)
 
         if action == "ov:imgmaxh":
@@ -912,7 +955,9 @@ class TelegramBot:
                 return "\u274c Must be >= 0 (0 = original)", _kb_ov_image(self.cfg)
             self.cfg.overlay.image_max_height = v
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             label = f"{v}px" if v > 0 else "original"
             return f"\u2705 Max height: {label}", _kb_ov_image(self.cfg)
 
@@ -920,7 +965,7 @@ class TelegramBot:
         if action == "ov:text":
             self.cfg.overlay.enabled = True
             self.cfg.overlay.text = text.strip("\"'")
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Overlay text:\n<code>{text}</code>", _kb_ov_text(self.cfg)
 
         if action == "ov:txtcustompos":
@@ -935,7 +980,9 @@ class TelegramBot:
             self.cfg.overlay.text_x = x
             self.cfg.overlay.text_y = y
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Position: ({x},{y})", _kb_position("ovtxtpos")
 
         if action == "ov:textopacity":
@@ -947,7 +994,9 @@ class TelegramBot:
                 return "\u274c Must be 0.0\u20131.0", _kb_ov_text(self.cfg)
             self.cfg.overlay.text_opacity = v
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Text opacity: {v:.2f}", _kb_ov_text(self.cfg)
 
         if action == "ov:size":
@@ -959,13 +1008,17 @@ class TelegramBot:
                 return "\u274c Font size must be 8\u2013500", _kb_ov_text(self.cfg)
             self.cfg.overlay.font_size = v
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Font size: {v}px", _kb_ov_text(self.cfg)
 
         if action == "ov:color":
             self.cfg.overlay.font_color = text.strip()
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Color: {text.strip()}", _kb_ov_text(self.cfg)
 
         if action == "ov:font":
@@ -977,7 +1030,9 @@ class TelegramBot:
             else:
                 return f"\u274c File not found: <code>{val}</code>", _kb_ov_text(self.cfg)
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Font: {val}", _kb_ov_text(self.cfg)
 
         # -- Targets --
@@ -992,7 +1047,7 @@ class TelegramBot:
             if url in self.cfg.output.targets:
                 return f"Already present:\n<code>{url}</code>", _kb_targets(self.cfg)
             self.cfg.output.targets.append(url)
-            await self.manager.reload_output()
+            await self._reload_output()
             return f"\u2705 Added:\n<code>{url}</code>", _kb_targets(self.cfg)
 
         # -- Output encoding --
@@ -1006,7 +1061,7 @@ class TelegramBot:
                     _kb_out(self.cfg),
                 )
             self.cfg.output.video.bitrate = normalized
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Bitrate: {normalized}", _kb_out(self.cfg)
 
         if action == "out:fps":
@@ -1018,7 +1073,7 @@ class TelegramBot:
                 return f"\u274c FPS must be {_MIN_FPS}\u2013{_MAX_FPS}", _kb_out(self.cfg)
             self.cfg.output.video.fps = fps
             self.cfg.output.video.gop = fps * 2
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 FPS: {fps} (gop={fps * 2})", _kb_out(self.cfg)
 
         if action == "out:size":
@@ -1035,7 +1090,7 @@ class TelegramBot:
                 )
             self.cfg.output.video.width = w
             self.cfg.output.video.height = h
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Size: {w}\u00d7{h}", _kb_out(self.cfg)
 
         return "\u274c Unknown action", [[_btn("\u25c0\ufe0f Menu", "menu:main")]]
@@ -1092,13 +1147,13 @@ class TelegramBot:
         if sub == "black":
             self.cfg.placeholder.type = "black"
             self.cfg.placeholder.path = None
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return "\u2705 Placeholder \u2192 black"
 
         if sub == "testcard":
             self.cfg.placeholder.type = "testcard"
             self.cfg.placeholder.path = None
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return "\u2705 Placeholder \u2192 testcard"
 
         if sub == "text":
@@ -1107,10 +1162,10 @@ class TelegramBot:
                 return "Usage: /placeholder text <text>  (or 'off' to remove)"
             if text.lower() == "off":
                 self.cfg.placeholder.text = None
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return "\u2705 Placeholder text removed"
             self.cfg.placeholder.text = text
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Placeholder text overlay: <code>{text}</code>"
 
         if sub in ("image", "video"):
@@ -1121,13 +1176,13 @@ class TelegramBot:
                 return f"\u274c File not found: <code>{path}</code>"
             self.cfg.placeholder.type = sub
             self.cfg.placeholder.path = path
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Placeholder \u2192 {sub}: <code>{path}</code>"
 
         if sub == "opacity":
             return await _set_float(
                 args, self.cfg.placeholder, "opacity",
-                0.0, 1.0, self.manager.reload_compositor, "Opacity",
+                0.0, 1.0, self._reload_compositor, "Opacity",
             )
 
         if sub in ("pos", "position"):
@@ -1143,7 +1198,7 @@ class TelegramBot:
                 )
             if val in POSITION_PRESETS and val != "custom":
                 self.cfg.placeholder.text_position = val
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return f"\u2705 Text position: {val}"
             if val == "custom" or "," in val:
                 coords = val.replace("custom", "").strip().strip(",").strip()
@@ -1159,7 +1214,7 @@ class TelegramBot:
                 self.cfg.placeholder.text_position = "custom"
                 self.cfg.placeholder.x = x
                 self.cfg.placeholder.y = y
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return f"\u2705 Text position: custom ({x},{y})"
             return f"\u274c Unknown position: <code>{val}</code>"
 
@@ -1173,17 +1228,18 @@ class TelegramBot:
 
         sub = args[0].lower()
         reload_fn = (
-            self.manager.reload_compositor if self.cfg.overlay.enabled else None
+            self._reload_compositor if self.cfg.overlay.enabled
+            else self._save_state_async
         )
 
         if sub == "off":
             self.cfg.overlay.enabled = False
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return "\u2705 Overlay disabled"
 
         if sub == "on":
             self.cfg.overlay.enabled = True
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return "\u2705 Overlay enabled"
 
         if sub == "text":
@@ -1193,11 +1249,13 @@ class TelegramBot:
             if text.lower() == "off":
                 self.cfg.overlay.text = None
                 if self.cfg.overlay.enabled:
-                    await self.manager.reload_compositor()
+                    await self._reload_compositor()
+                else:
+                    self._save_state()
                 return "\u2705 Overlay text removed"
             self.cfg.overlay.enabled = True
             self.cfg.overlay.text = text
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Overlay text: <code>{text}</code>"
 
         if sub == "image":
@@ -1207,13 +1265,15 @@ class TelegramBot:
             if path.lower() == "off":
                 self.cfg.overlay.path = None
                 if self.cfg.overlay.enabled:
-                    await self.manager.reload_compositor()
+                    await self._reload_compositor()
+                else:
+                    self._save_state()
                 return "\u2705 Overlay image removed"
             if not os.path.isfile(path):
                 return f"\u274c File not found: <code>{path}</code>"
             self.cfg.overlay.enabled = True
             self.cfg.overlay.path = path
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Overlay image: <code>{path}</code>"
 
         if sub == "maxheight":
@@ -1241,7 +1301,9 @@ class TelegramBot:
                 return "Usage: /overlay color <name or #RRGGBB>"
             self.cfg.overlay.font_color = args[1]
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Color \u2192 {args[1]}"
 
         return f"\u2753 Unknown: /overlay {sub}"
@@ -1263,7 +1325,7 @@ class TelegramBot:
             if url in self.cfg.output.targets:
                 return f"Already present: <code>{url}</code>"
             self.cfg.output.targets.append(url)
-            await self.manager.reload_output()
+            await self._reload_output()
             return f"\u2705 Added: <code>{url}</code>"
 
         if sub == "remove":
@@ -1274,7 +1336,9 @@ class TelegramBot:
                 return f"Not in list: <code>{url}</code>"
             self.cfg.output.targets.remove(url)
             if self.cfg.output.targets:
-                await self.manager.reload_output()
+                await self._reload_output()
+            else:
+                self._save_state()
             return f"\u2705 Removed: <code>{url}</code>"
 
         if sub == "set":
@@ -1283,7 +1347,7 @@ class TelegramBot:
             if not _is_valid_rtmp_url(args[1]):
                 return "\u274c URL must start with rtmp:// or rtmps://"
             self.cfg.output.targets = [args[1]]
-            await self.manager.reload_output()
+            await self._reload_output()
             return f"\u2705 Target set: <code>{args[1]}</code>"
 
         return f"\u2753 Unknown: /target {sub}"
@@ -1307,7 +1371,7 @@ class TelegramBot:
                     f"Range: {_MIN_BITRATE_KBPS}k\u2013{_MAX_BITRATE_KBPS}k"
                 )
             self.cfg.output.video.bitrate = normalized
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Bitrate \u2192 {normalized}"
 
         if sub == "fps":
@@ -1319,7 +1383,7 @@ class TelegramBot:
                     raise ValueError
                 self.cfg.output.video.fps = fps
                 self.cfg.output.video.gop = fps * 2
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return f"\u2705 FPS \u2192 {fps} (gop={fps * 2})"
             except ValueError:
                 return f"\u274c FPS must be {_MIN_FPS}\u2013{_MAX_FPS}"
@@ -1335,7 +1399,7 @@ class TelegramBot:
                     raise ValueError
                 self.cfg.output.video.width = w
                 self.cfg.output.video.height = h
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return f"\u2705 Size \u2192 {w}\u00d7{h}"
             except (ValueError, TypeError):
                 return (
@@ -1351,7 +1415,7 @@ class TelegramBot:
                     f"<{' | '.join(sorted(_X264_PRESETS))}>"
                 )
             self.cfg.output.video.preset = args[1]
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Preset \u2192 {args[1]}"
 
         return f"\u2753 Unknown: /output {sub}"

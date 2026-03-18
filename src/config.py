@@ -1,5 +1,5 @@
 """Configuration loading and dataclasses for immortal-stream."""
-from dataclasses import dataclass, field, fields as dc_fields
+from dataclasses import dataclass, field, fields as dc_fields, asdict
 from typing import Optional, List
 import logging
 import os
@@ -280,3 +280,100 @@ def load_config(path: str) -> Config:
 
     _validate(cfg)
     return cfg
+
+
+# ---------------------------------------------------------------------------
+#  Runtime state persistence
+# ---------------------------------------------------------------------------
+
+# Sections saved to state file — only bot-modifiable settings.
+_STATE_SECTIONS = ("placeholder", "overlay", "output")
+
+
+def save_state(cfg: Config, path: str) -> None:
+    """Persist bot-modifiable settings to a YAML state file.
+
+    Writes atomically (tmp + rename) to prevent corruption on crash.
+    Only saves sections the bot can change: placeholder, overlay, output.
+    """
+    state: dict = {}
+    state["placeholder"] = asdict(cfg.placeholder)
+    state["overlay"] = asdict(cfg.overlay)
+    state["output"] = {
+        "targets": list(cfg.output.targets),
+        "video": asdict(cfg.output.video),
+    }
+
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(tmp, "w") as f:
+            yaml.safe_dump(state, f, default_flow_style=False, allow_unicode=True)
+        os.replace(tmp, path)
+    except Exception:
+        log.exception("Failed to save state to %s", path)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def load_state(cfg: Config, path: str) -> bool:
+    """Restore bot-modifiable settings from a saved state file.
+
+    Merges saved values on top of the already-loaded base config.
+    Returns True if state was loaded, False if no state file exists.
+    Silently ignores corrupt or unreadable state files.
+    """
+    if not os.path.isfile(path):
+        return False
+
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            return False
+    except Exception:
+        log.warning("Failed to read state file %s — ignoring", path)
+        return False
+
+    log.info("Restoring saved state from %s", path)
+
+    if "placeholder" in data and isinstance(data["placeholder"], dict):
+        p = data["placeholder"]
+        if "opacity" in p:
+            p["opacity"] = float(p["opacity"])
+        # Validate file existence — fall back to base config if missing
+        ph_type = p.get("type", cfg.placeholder.type)
+        ph_path = p.get("path")
+        if ph_type in ("image", "video") and ph_path and not os.path.isfile(ph_path):
+            log.warning(
+                "State placeholder.path %r no longer exists — "
+                "falling back to base config placeholder", ph_path,
+            )
+        else:
+            cfg.placeholder = _populate(PlaceholderConfig, p)
+
+    if "overlay" in data and isinstance(data["overlay"], dict):
+        o = data["overlay"]
+        if "image_opacity" in o:
+            o["image_opacity"] = float(o["image_opacity"])
+        if "text_opacity" in o:
+            o["text_opacity"] = float(o["text_opacity"])
+        ov_path = o.get("path")
+        if ov_path and not os.path.isfile(ov_path):
+            log.warning(
+                "State overlay.path %r no longer exists — "
+                "falling back to base config overlay", ov_path,
+            )
+        else:
+            cfg.overlay = _populate(OverlayConfig, o)
+
+    if "output" in data and isinstance(data["output"], dict):
+        od = data["output"]
+        if "targets" in od and isinstance(od["targets"], list):
+            cfg.output.targets = od["targets"]
+        if "video" in od and isinstance(od["video"], dict):
+            cfg.output.video = _populate(VideoConfig, od["video"])
+
+    return True

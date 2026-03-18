@@ -6,8 +6,12 @@ from config import Config, VideoConfig, PlaceholderConfig
 # Default font for drawtext when no font_path is configured.
 DEFAULT_FONT = "/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
 
-# Directory for pre-resized overlay images.
-_OVERLAY_CACHE_DIR = "/tmp/immortal-stream"
+# Directory for pre-processed images (overlay, placeholder).
+# Persistent across restarts; controlled by CACHE_DIR env var.
+import os as _os
+_OVERLAY_CACHE_DIR = _os.environ.get(
+    "CACHE_DIR", "/var/lib/immortal-stream/cache"
+)
 
 
 # ---------------------------------------------------------------------------

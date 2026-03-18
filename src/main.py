@@ -13,7 +13,7 @@ import signal
 import socket
 import sys
 
-from config import load_config
+from config import load_config, load_state
 from mediamtx_manager import MediamtxManager
 from stream_manager import StreamManager
 from telegram import TelegramNotifier, NoopNotifier
@@ -27,6 +27,7 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/etc/immortal-stream/config.yaml")
+STATE_PATH = os.environ.get("STATE_PATH", "")  # default: alongside config
 
 
 def _is_telegram_configured(cfg) -> bool:
@@ -88,6 +89,13 @@ async def main() -> None:
         log.critical("Failed to load config from %s: %s", CONFIG_PATH, e)
         sys.exit(1)
 
+    # -- Restore saved runtime state (bot settings) -------------------------
+    state_path = STATE_PATH or os.path.join(
+        os.path.dirname(CONFIG_PATH), "state.yaml",
+    )
+    if load_state(cfg, state_path):
+        log.info("Restored runtime state from %s", state_path)
+
     level = getattr(logging, cfg.log_level, logging.INFO)
     logging.getLogger().setLevel(level)
 
@@ -134,7 +142,7 @@ async def main() -> None:
     # -- Telegram bot (runtime config changes) -----------------------------
     bot = None
     if _is_telegram_configured(cfg):
-        bot = TelegramBot(cfg, manager)
+        bot = TelegramBot(cfg, manager, state_path=state_path)
         bot.start()
 
     # -- Startup notification ----------------------------------------------
