@@ -1350,6 +1350,15 @@ class TelegramBot:
             or "  (none)"
         )
 
+        # CPU load hints (compare input vs output)
+        hints = _cpu_hints(self.cfg, stream)
+        hints_block = ""
+        if hints:
+            hints_block = (
+                "\n\n\U0001f525 <b>CPU load:</b>\n"
+                + "\n".join(f"  \u2022 {h}" for h in hints)
+            )
+
         return (
             f"{state}\n\n"
             f"<b>Placeholder:</b> {ph_desc}\n"
@@ -1357,6 +1366,7 @@ class TelegramBot:
             f"<b>Output:</b> {v.width}\u00d7{v.height} "
             f"@{v.fps}fps {v.bitrate} preset={v.preset}\n"
             f"<b>Targets:</b>\n{targets}"
+            f"{hints_block}"
         )
 
     def _text_ph(self) -> str:
@@ -1708,6 +1718,150 @@ _MIN_WIDTH = 160
 _MAX_WIDTH = 3840
 _MIN_HEIGHT = 120
 _MAX_HEIGHT = 2160
+
+
+_PRESET_WEIGHT = {
+    "ultrafast": 0, "superfast": 1, "veryfast": 2, "faster": 3,
+    "fast": 4, "medium": 5, "slow": 6, "slower": 7, "veryslow": 8,
+}
+
+
+def _parse_fps(fps_str: str) -> float:
+    """Parse fps string like '30', '29.97', '30/1', '60000/1001'."""
+    try:
+        if "/" in fps_str:
+            num, den = fps_str.split("/", 1)
+            return float(num) / float(den)
+        return float(fps_str)
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _cpu_hints(cfg: Config, stream=None) -> list:
+    """Return CPU load hints based on input/output mismatches."""
+    hints = []
+    v = cfg.output.video
+    a = cfg.output.audio
+    pw = _PRESET_WEIGHT.get(v.preset, 5)
+    out_px = v.width * v.height
+
+    if stream and stream.has_video and stream.width > 0 and stream.height > 0:
+        in_w, in_h = stream.width, stream.height
+        in_px = in_w * in_h
+
+        # --- Resolution mismatch ---
+        if in_w != v.width or in_h != v.height:
+            if in_px > out_px:
+                ratio = in_px / out_px
+                hints.append(
+                    f"<b>Downscale {in_w}\u00d7{in_h} \u2192 "
+                    f"{v.width}\u00d7{v.height}</b> ({ratio:.1f}x pixels) "
+                    f"(/output size)"
+                )
+            else:
+                ratio = out_px / in_px
+                hints.append(
+                    f"<b>Upscale {in_w}\u00d7{in_h} \u2192 "
+                    f"{v.width}\u00d7{v.height}</b> ({ratio:.1f}x pixels) "
+                    f"\u2014 wasteful, match input (/output size)"
+                )
+
+        # --- Aspect ratio mismatch (padding) ---
+        in_ar = in_w / in_h if in_h else 0
+        out_ar = v.width / v.height if v.height else 0
+        if in_ar and out_ar and abs(in_ar - out_ar) > 0.05:
+            hints.append(
+                f"<b>Aspect ratio mismatch</b> "
+                f"({in_ar:.2f} \u2192 {out_ar:.2f}) \u2014 "
+                f"padding added (/output size)"
+            )
+
+        # --- FPS mismatch ---
+        in_fps = _parse_fps(stream.fps)
+        if in_fps > 0 and in_fps != v.fps:
+            if in_fps > v.fps:
+                hints.append(
+                    f"<b>FPS drop {in_fps:.0f} \u2192 {v.fps}</b> "
+                    f"\u2014 frame skipping (/output fps)"
+                )
+            else:
+                hints.append(
+                    f"<b>FPS up {in_fps:.0f} \u2192 {v.fps}</b> "
+                    f"\u2014 frame duplication, wasteful (/output fps)"
+                )
+
+        # --- Codec decode complexity ---
+        codec = (stream.codec_video or "").lower()
+        if codec in ("hevc", "h265", "h.265"):
+            hints.append(
+                "<b>H.265 input</b> \u2014 heavy decode + re-encode to H.264"
+            )
+        elif codec in ("av1",):
+            hints.append(
+                "<b>AV1 input</b> \u2014 very heavy decode + re-encode to H.264"
+            )
+        elif codec in ("vp9",):
+            hints.append(
+                "<b>VP9 input</b> \u2014 heavy decode + re-encode to H.264"
+            )
+
+        # --- Audio sample rate mismatch ---
+        if stream.has_audio and stream.codec_audio != "n/a":
+            # We can't probe input sample rate from StreamInfo,
+            # but codec mismatch means re-encoding is guaranteed
+            audio_codec = (stream.codec_audio or "").lower()
+            if audio_codec and audio_codec not in ("aac",):
+                hints.append(
+                    f"<b>Audio {stream.codec_audio} \u2192 AAC</b> "
+                    f"\u2014 transcoding (/output audio)"
+                )
+
+    elif not stream:
+        # No live stream — placeholder mode
+        hints.append(
+            "<b>Placeholder active</b> \u2014 "
+            "generating video from scratch (normal idle load)"
+        )
+
+    # --- Always-on factors (regardless of stream) ---
+
+    # Preset weight
+    if pw >= 6:
+        hints.append(
+            f"<b>Preset {v.preset}</b> \u2014 heavy encoder; "
+            f"try <code>fast</code>/<code>veryfast</code> (/output preset)"
+        )
+    elif pw >= 4:
+        hints.append(
+            f"<b>Preset {v.preset}</b> \u2014 moderate encoder load "
+            f"(/output preset)"
+        )
+
+    # Output resolution absolute cost
+    if out_px >= 3840 * 2160:
+        hints.append(
+            f"<b>4K output</b> \u2014 extreme encoding cost (/output size)"
+        )
+    elif out_px >= 2560 * 1440:
+        hints.append(
+            f"<b>1440p output</b> \u2014 high encoding cost (/output size)"
+        )
+
+    # Overlay compositing
+    if cfg.overlay.enabled:
+        hints.append(
+            "<b>Overlay</b> \u2014 compositing filter active (/overlay off)"
+        )
+
+    # Multi-target muxing
+    n = len(cfg.output.targets)
+    if n >= 3:
+        hints.append(f"<b>{n} targets</b> \u2014 muxing overhead")
+
+    if not hints:
+        hints.append("\u2714 No bottlenecks detected")
+
+    return hints
 
 
 def _position_label(pos: str) -> str:
