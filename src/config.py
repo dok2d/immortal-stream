@@ -12,7 +12,7 @@ import yaml
 log = logging.getLogger("config")
 
 _VALID_PLACEHOLDER_TYPES = {"black", "image", "video", "testcard"}
-_VALID_OVERLAY_TYPES = {"image", "text"}
+_VALID_OVERLAY_TYPES = {"image", "text"}  # legacy, kept for config compat
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _X264_PRESETS = {
     "ultrafast", "superfast", "veryfast", "faster", "fast",
@@ -49,16 +49,22 @@ class PlaceholderConfig:
 @dataclass
 class OverlayConfig:
     enabled: bool = False
-    type: str = "image"
+    # Image overlay
     path: Optional[str] = None
+    image_position: str = "top-left"
+    image_x: int = 20
+    image_y: int = 20
+    image_opacity: float = 1.0
+    image_max_height: int = 0       # 0 = original size; >0 = scale to max px height
+    # Text overlay
     text: Optional[str] = None
     font_path: Optional[str] = None
     font_size: int = 48
     font_color: str = "white"
-    position: str = "top-left"
-    x: int = 20
-    y: int = 20
-    opacity: float = 1.0
+    text_position: str = "top-left"
+    text_x: int = 20
+    text_y: int = 20
+    text_opacity: float = 1.0
 
 
 @dataclass
@@ -145,18 +151,18 @@ def _validate(cfg: Config) -> None:
         raise ValueError(f"placeholder.opacity must be 0.0–1.0, got {ph.opacity}")
 
     ov = cfg.overlay
-    if ov.enabled:
-        if ov.type not in _VALID_OVERLAY_TYPES:
-            raise ValueError(
-                f"overlay.type must be one of {_VALID_OVERLAY_TYPES}, "
-                f"got {ov.type!r}"
-            )
-        if ov.type == "image" and not ov.path:
-            raise ValueError("overlay.path is required for type='image'")
-        if ov.type == "text" and not ov.text:
-            raise ValueError("overlay.text is required for type='text'")
-    if not 0.0 <= ov.opacity <= 1.0:
-        raise ValueError(f"overlay.opacity must be 0.0–1.0, got {ov.opacity}")
+    if not 0.0 <= ov.image_opacity <= 1.0:
+        raise ValueError(
+            f"overlay.image_opacity must be 0.0–1.0, got {ov.image_opacity}"
+        )
+    if not 0.0 <= ov.text_opacity <= 1.0:
+        raise ValueError(
+            f"overlay.text_opacity must be 0.0–1.0, got {ov.text_opacity}"
+        )
+    if ov.image_max_height < 0:
+        raise ValueError(
+            f"overlay.image_max_height must be >= 0, got {ov.image_max_height}"
+        )
 
     v = cfg.output.video
     if v.preset not in _X264_PRESETS:
@@ -202,11 +208,8 @@ def _validate(cfg: Config) -> None:
             f"placeholder.path {ph.path!r} does not exist "
             f"(required for type={ph.type!r})"
         )
-    if ov.enabled and ov.type == "image" and ov.path and not os.path.isfile(ov.path):
-        raise ValueError(
-            f"overlay.path {ov.path!r} does not exist "
-            f"(required for type='image')"
-        )
+    if ov.enabled and ov.path and not os.path.isfile(ov.path):
+        raise ValueError(f"overlay.path {ov.path!r} does not exist")
 
     # Validate font files
     for label, font_path in [
@@ -245,8 +248,19 @@ def load_config(path: str) -> Config:
 
     if "overlay" in data:
         o = data["overlay"]
-        if "opacity" in o:
-            o["opacity"] = float(o["opacity"])
+        # Migrate legacy flat format (type + shared position/opacity)
+        legacy_type = o.pop("type", None)
+        for field in ("position", "x", "y", "opacity"):
+            if field in o:
+                val = o.pop(field)
+                if legacy_type == "text":
+                    o.setdefault(f"text_{field}", val)
+                else:
+                    o.setdefault(f"image_{field}", val)
+        if "image_opacity" in o:
+            o["image_opacity"] = float(o["image_opacity"])
+        if "text_opacity" in o:
+            o["text_opacity"] = float(o["text_opacity"])
         cfg.overlay = _populate(OverlayConfig, o)
 
     if "output" in data:

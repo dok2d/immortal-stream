@@ -379,33 +379,47 @@ def build_compositor_live(
     # Scale/pad incoming to output resolution
     filters.append(_scale_pad(v, "0:v", "vscaled"))
 
-    # Overlay (only in LIVE mode)
+    # Overlay layers (only in LIVE mode) — image and text are independent
     if ov.enabled:
-        if ov.type == "image" and ov.path:
+        # Layer 1: image overlay
+        if ov.path:
             cmd += ["-loop", "1", "-i", ov.path]
+            scale = ""
+            if ov.image_max_height > 0:
+                scale = (
+                    f",scale=-1:{ov.image_max_height}"
+                    f":force_original_aspect_ratio=decrease"
+                )
             alpha = (
-                f",colorchannelmixer=aa={ov.opacity:.3f}"
-                if ov.opacity < 1.0 else ""
+                f",colorchannelmixer=aa={ov.image_opacity:.3f}"
+                if ov.image_opacity < 1.0 else ""
             )
-            filters.append(f"[{input_idx}:v]format=rgba{alpha}[ov_img]")
-            ox, oy = _resolve_overlay_pos(ov.position, ov.x, ov.y)
+            filters.append(
+                f"[{input_idx}:v]format=rgba{scale}{alpha}[ov_img]"
+            )
+            ox, oy = _resolve_overlay_pos(
+                ov.image_position, ov.image_x, ov.image_y,
+            )
             filters.append(
                 f"[{last_v}][ov_img]overlay={ox}:{oy}[vwith_ov]"
             )
             last_v = "vwith_ov"
             input_idx += 1
 
-        elif ov.type == "text" and ov.text:
+        # Layer 2: text overlay (drawn on top of image overlay)
+        if ov.text:
             escaped = _escape_drawtext(ov.text)
             font = ov.font_path or DEFAULT_FONT
-            tx, ty = _resolve_drawtext_pos(ov.position, ov.x, ov.y)
+            tx, ty = _resolve_drawtext_pos(
+                ov.text_position, ov.text_x, ov.text_y,
+            )
             opts = [
                 f"fontfile={font}",
                 f"text={escaped}",
                 f"x={tx}",
                 f"y={ty}",
                 f"fontsize={ov.font_size}",
-                f"fontcolor={ov.font_color}@{ov.opacity:.3f}",
+                f"fontcolor={ov.font_color}@{ov.text_opacity:.3f}",
             ] + _border_opts(ov.font_color)
             filters.append(
                 f"[{last_v}]drawtext={':'.join(opts)}[vwith_text]"

@@ -238,9 +238,11 @@ class TelegramBot:
             "ph":     self._cb_placeholder,
             "phtxt":  self._cb_ph_text,
             "phpos":  self._cb_ph_pos,
-            "ov":     self._cb_overlay,
-            "ovtxt":  self._cb_ov_text,
-            "ovpos":  self._cb_ov_pos,
+            "ov":       self._cb_overlay,
+            "ovimg":    self._cb_ov_image,
+            "ovimgpos": self._cb_ov_img_pos,
+            "ovtxt":    self._cb_ov_text,
+            "ovtxtpos": self._cb_ov_txt_pos,
             "target": self._cb_target,
             "out":    self._cb_output,
             "power":  self._cb_power,
@@ -530,7 +532,17 @@ class TelegramBot:
             await self.manager.reload_compositor()
             return self._text_ov() + "\n\n\u2705 Enabled", _kb_ov(self.cfg), "On"
 
-        if act == "image":
+        return self._text_ov(), _kb_ov(self.cfg), ""
+
+    # -- Overlay Image submenu -----------------------------------------------
+
+    async def _cb_ov_image(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ov_image(), _kb_ov_image(self.cfg), ""
+
+        if act == "set":
             self._awaiting = "ov:image"
             await self._send_prompt(
                 "\U0001f4f7 Send a photo (PNG recommended), "
@@ -538,15 +550,57 @@ class TelegramBot:
             )
             return None, None, ""
 
+        if act == "clear":
+            self.cfg.overlay.path = None
+            if self.cfg.overlay.enabled:
+                await self.manager.reload_compositor()
+            return (
+                self._text_ov_image() + "\n\n\u2705 Image cleared",
+                _kb_ov_image(self.cfg), "Cleared",
+            )
+
+        if act == "pos":
+            return self._text_ov_img_pos(), _kb_position("ovimgpos"), ""
+
         if act == "opacity":
-            self._awaiting = "ov:opacity"
+            self._awaiting = "ov:imgopacity"
             await self._send_prompt(
-                f"Current: {self.cfg.overlay.opacity:.2f}\n"
+                f"Current: {self.cfg.overlay.image_opacity:.2f}\n"
                 "Send value (0.0\u20131.0):"
             )
             return None, None, ""
 
-        return self._text_ov(), _kb_ov(self.cfg), ""
+        if act == "maxh":
+            self._awaiting = "ov:imgmaxh"
+            await self._send_prompt(
+                f"Current: {self.cfg.overlay.image_max_height or 'original'}\n"
+                "Send max height in pixels (0 = original size):"
+            )
+            return None, None, ""
+
+        return self._text_ov_image(), _kb_ov_image(self.cfg), ""
+
+    async def _cb_ov_img_pos(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ov_img_pos(), _kb_position("ovimgpos"), ""
+
+        if act == "custom":
+            self._awaiting = "ov:imgcustompos"
+            await self._send_prompt(
+                "Send coordinates as <code>x,y</code> (pixels):"
+            )
+            return None, None, ""
+
+        if act in POSITION_PRESETS and act != "custom":
+            self.cfg.overlay.image_position = act
+            if self.cfg.overlay.enabled:
+                await self.manager.reload_compositor()
+            return (
+                self._text_ov_img_pos() + f"\n\n\u2705 {act}",
+                _kb_position("ovimgpos"), act,
+            )
 
     # -- Overlay Text submenu -----------------------------------------------
 
@@ -560,6 +614,15 @@ class TelegramBot:
             self._awaiting = "ov:text"
             await self._send_prompt("\u270f\ufe0f Send overlay text:")
             return None, None, ""
+
+        if act == "clear":
+            self.cfg.overlay.text = None
+            if self.cfg.overlay.enabled:
+                await self.manager.reload_compositor()
+            return (
+                self._text_ov_text() + "\n\n\u2705 Text cleared",
+                _kb_ov_text(self.cfg), "Cleared",
+            )
 
         if act == "size":
             self._awaiting = "ov:size"
@@ -578,12 +641,12 @@ class TelegramBot:
             return None, None, ""
 
         if act == "pos":
-            return self._text_ov_pos(), _kb_position("ovpos"), ""
+            return self._text_ov_txt_pos(), _kb_position("ovtxtpos"), ""
 
         if act == "opacity":
             self._awaiting = "ov:textopacity"
             await self._send_prompt(
-                f"Current: {self.cfg.overlay.opacity:.2f}\n"
+                f"Current: {self.cfg.overlay.text_opacity:.2f}\n"
                 "Send text opacity (0.0\u20131.0):"
             )
             return None, None, ""
@@ -598,27 +661,26 @@ class TelegramBot:
 
         return self._text_ov_text(), _kb_ov_text(self.cfg), ""
 
-    async def _cb_ov_pos(self, p):
+    async def _cb_ov_txt_pos(self, p):
         act = p[1] if len(p) > 1 else "menu"
 
         if act == "menu":
-            return self._text_ov_pos(), _kb_position("ovpos"), ""
+            return self._text_ov_txt_pos(), _kb_position("ovtxtpos"), ""
 
         if act == "custom":
-            self._awaiting = "ov:custompos"
+            self._awaiting = "ov:txtcustompos"
             await self._send_prompt(
                 "Send coordinates as <code>x,y</code> (pixels):"
             )
             return None, None, ""
 
-        # Position preset
         if act in POSITION_PRESETS and act != "custom":
-            self.cfg.overlay.position = act
+            self.cfg.overlay.text_position = act
             if self.cfg.overlay.enabled:
                 await self.manager.reload_compositor()
             return (
-                self._text_ov_pos() + f"\n\n\u2705 {act}",
-                _kb_position("ovpos"), act,
+                self._text_ov_txt_pos() + f"\n\n\u2705 {act}",
+                _kb_position("ovtxtpos"), act,
             )
 
     # -- Targets -----------------------------------------------------------
@@ -805,49 +867,76 @@ class TelegramBot:
             await self.manager.reload_compositor()
             return f"\u2705 Position: ({x},{y})", _kb_position("phpos")
 
-        # -- Overlay --
+        # -- Overlay Image --
+        if action == "ov:image":
+            if not os.path.isfile(text):
+                return f"\u274c File not found: <code>{text}</code>", _kb_ov_image(self.cfg)
+            self.cfg.overlay.enabled = True
+            self.cfg.overlay.path = text
+            await self.manager.reload_compositor()
+            return f"\u2705 Overlay image:\n<code>{text}</code>", _kb_ov_image(self.cfg)
+
+        if action == "ov:imgcustompos":
+            parts = text.replace(" ", "").split(",")
+            if len(parts) != 2:
+                return "\u274c Format: <code>x,y</code>", _kb_position("ovimgpos")
+            try:
+                x, y = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                return "\u274c Coordinates must be integers", _kb_position("ovimgpos")
+            self.cfg.overlay.image_position = "custom"
+            self.cfg.overlay.image_x = x
+            self.cfg.overlay.image_y = y
+            if self.cfg.overlay.enabled:
+                await self.manager.reload_compositor()
+            return f"\u2705 Position: ({x},{y})", _kb_position("ovimgpos")
+
+        if action == "ov:imgopacity":
+            try:
+                v = float(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ov_image(self.cfg)
+            if not 0.0 <= v <= 1.0:
+                return "\u274c Must be 0.0\u20131.0", _kb_ov_image(self.cfg)
+            self.cfg.overlay.image_opacity = v
+            if self.cfg.overlay.enabled:
+                await self.manager.reload_compositor()
+            return f"\u2705 Image opacity: {v:.2f}", _kb_ov_image(self.cfg)
+
+        if action == "ov:imgmaxh":
+            try:
+                v = int(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be an integer", _kb_ov_image(self.cfg)
+            if v < 0:
+                return "\u274c Must be >= 0 (0 = original)", _kb_ov_image(self.cfg)
+            self.cfg.overlay.image_max_height = v
+            if self.cfg.overlay.enabled:
+                await self.manager.reload_compositor()
+            label = f"{v}px" if v > 0 else "original"
+            return f"\u2705 Max height: {label}", _kb_ov_image(self.cfg)
+
+        # -- Overlay Text --
         if action == "ov:text":
             self.cfg.overlay.enabled = True
-            self.cfg.overlay.type = "text"
             self.cfg.overlay.text = text.strip("\"'")
             await self.manager.reload_compositor()
             return f"\u2705 Overlay text:\n<code>{text}</code>", _kb_ov_text(self.cfg)
 
-        if action == "ov:image":
-            if not os.path.isfile(text):
-                return f"\u274c File not found: <code>{text}</code>", _kb_ov(self.cfg)
-            self.cfg.overlay.enabled = True
-            self.cfg.overlay.type = "image"
-            self.cfg.overlay.path = text
-            await self.manager.reload_compositor()
-            return f"\u2705 Overlay image:\n<code>{text}</code>", _kb_ov(self.cfg)
-
-        if action == "ov:custompos":
+        if action == "ov:txtcustompos":
             parts = text.replace(" ", "").split(",")
             if len(parts) != 2:
-                return "\u274c Format: <code>x,y</code>", _kb_position("ovpos")
+                return "\u274c Format: <code>x,y</code>", _kb_position("ovtxtpos")
             try:
                 x, y = int(parts[0]), int(parts[1])
             except (ValueError, TypeError):
-                return "\u274c Coordinates must be integers", _kb_position("ovpos")
-            self.cfg.overlay.position = "custom"
-            self.cfg.overlay.x = x
-            self.cfg.overlay.y = y
+                return "\u274c Coordinates must be integers", _kb_position("ovtxtpos")
+            self.cfg.overlay.text_position = "custom"
+            self.cfg.overlay.text_x = x
+            self.cfg.overlay.text_y = y
             if self.cfg.overlay.enabled:
                 await self.manager.reload_compositor()
-            return f"\u2705 Position: ({x},{y})", _kb_position("ovpos")
-
-        if action == "ov:opacity":
-            try:
-                v = float(text)
-            except (ValueError, TypeError):
-                return "\u274c Must be a number 0.0\u20131.0", _kb_ov(self.cfg)
-            if not 0.0 <= v <= 1.0:
-                return "\u274c Must be 0.0\u20131.0", _kb_ov(self.cfg)
-            self.cfg.overlay.opacity = v
-            if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
-            return f"\u2705 Opacity: {v:.2f}", _kb_ov(self.cfg)
+            return f"\u2705 Position: ({x},{y})", _kb_position("ovtxtpos")
 
         if action == "ov:textopacity":
             try:
@@ -856,7 +945,7 @@ class TelegramBot:
                 return "\u274c Must be a number 0.0\u20131.0", _kb_ov_text(self.cfg)
             if not 0.0 <= v <= 1.0:
                 return "\u274c Must be 0.0\u20131.0", _kb_ov_text(self.cfg)
-            self.cfg.overlay.opacity = v
+            self.cfg.overlay.text_opacity = v
             if self.cfg.overlay.enabled:
                 await self.manager.reload_compositor()
             return f"\u2705 Text opacity: {v:.2f}", _kb_ov_text(self.cfg)
@@ -1092,67 +1181,56 @@ class TelegramBot:
             await self.manager.reload_compositor()
             return "\u2705 Overlay disabled"
 
+        if sub == "on":
+            self.cfg.overlay.enabled = True
+            await self.manager.reload_compositor()
+            return "\u2705 Overlay enabled"
+
         if sub == "text":
             text = arg_str[len("text"):].strip().strip("\"'")
             if not text:
                 return "Usage: /overlay text <text>"
+            if text.lower() == "off":
+                self.cfg.overlay.text = None
+                if self.cfg.overlay.enabled:
+                    await self.manager.reload_compositor()
+                return "\u2705 Overlay text removed"
             self.cfg.overlay.enabled = True
-            self.cfg.overlay.type = "text"
             self.cfg.overlay.text = text
             await self.manager.reload_compositor()
-            return f"\u2705 Overlay \u2192 text: <code>{text}</code>"
+            return f"\u2705 Overlay text: <code>{text}</code>"
 
         if sub == "image":
             path = arg_str[len("image"):].strip()
             if not path:
                 return "Usage: /overlay image <path>"
+            if path.lower() == "off":
+                self.cfg.overlay.path = None
+                if self.cfg.overlay.enabled:
+                    await self.manager.reload_compositor()
+                return "\u2705 Overlay image removed"
             if not os.path.isfile(path):
                 return f"\u274c File not found: <code>{path}</code>"
             self.cfg.overlay.enabled = True
-            self.cfg.overlay.type = "image"
             self.cfg.overlay.path = path
             await self.manager.reload_compositor()
-            return f"\u2705 Overlay \u2192 image: <code>{path}</code>"
+            return f"\u2705 Overlay image: <code>{path}</code>"
 
-        if sub in ("pos", "position"):
-            val = arg_str[len(sub):].strip()
-            if not val:
-                presets = ", ".join(
-                    p for p in POSITION_PRESETS if p != "custom"
-                )
-                return (
-                    "Usage: /overlay pos <preset>\n"
-                    f"Presets: {presets}\n"
-                    "Or: /overlay pos custom <x>,<y>"
-                )
-            if val in POSITION_PRESETS and val != "custom":
-                self.cfg.overlay.position = val
-                if self.cfg.overlay.enabled:
-                    await self.manager.reload_compositor()
-                return f"\u2705 Overlay position: {val}"
-            if val == "custom" or "," in val:
-                coords = val.replace("custom", "").strip().strip(",").strip()
-                if not coords:
-                    return "Usage: /overlay pos custom <x>,<y>"
-                parts = coords.replace(" ", "").split(",")
-                if len(parts) != 2:
-                    return "\u274c Format: <code>x,y</code>"
-                try:
-                    x, y = int(parts[0]), int(parts[1])
-                except ValueError:
-                    return "\u274c Coordinates must be integers"
-                self.cfg.overlay.position = "custom"
-                self.cfg.overlay.x = x
-                self.cfg.overlay.y = y
-                if self.cfg.overlay.enabled:
-                    await self.manager.reload_compositor()
-                return f"\u2705 Overlay position: custom ({x},{y})"
-            return f"\u274c Unknown position: <code>{val}</code>"
+        if sub == "maxheight":
+            return await _set_int(
+                args, self.cfg.overlay, "image_max_height",
+                reload_fn, "Image max height",
+            )
 
         if sub == "opacity":
             return await _set_float(
-                args, self.cfg.overlay, "opacity",
-                0.0, 1.0, reload_fn, "Overlay opacity",
+                args, self.cfg.overlay, "image_opacity",
+                0.0, 1.0, reload_fn, "Image opacity",
+            )
+        if sub == "textopacity":
+            return await _set_float(
+                args, self.cfg.overlay, "text_opacity",
+                0.0, 1.0, reload_fn, "Text opacity",
             )
         if sub == "size":
             return await _set_int(
@@ -1328,17 +1406,22 @@ class TelegramBot:
             ph_desc += f" opacity={ph.opacity:.2f}"
 
         if ov.enabled:
-            ov_desc = (
-                f"text <code>{ov.text}</code>"
-                if ov.type == "text"
-                else f"image <code>{os.path.basename(ov.path or '')}</code>"
-            )
-            pos_str = ov.position
-            if pos_str == "custom":
-                pos_str += f" ({ov.x},{ov.y})"
-            ov_desc += f" [{pos_str}]"
-            if ov.opacity < 1.0:
-                ov_desc += f" opacity={ov.opacity:.2f}"
+            parts = []
+            if ov.path:
+                img_desc = f"image <code>{os.path.basename(ov.path)}</code>"
+                if ov.image_max_height > 0:
+                    img_desc += f" (max {ov.image_max_height}px)"
+                img_desc += f" [{ov.image_position}]"
+                if ov.image_opacity < 1.0:
+                    img_desc += f" opacity={ov.image_opacity:.2f}"
+                parts.append(img_desc)
+            if ov.text:
+                txt_desc = f"text <code>{ov.text}</code>"
+                txt_desc += f" [{ov.text_position}]"
+                if ov.text_opacity < 1.0:
+                    txt_desc += f" opacity={ov.text_opacity:.2f}"
+                parts.append(txt_desc)
+            ov_desc = " + ".join(parts) if parts else "enabled (no layers)"
         else:
             ov_desc = "disabled"
 
@@ -1406,40 +1489,59 @@ class TelegramBot:
         ov = self.cfg.overlay
         status = "enabled" if ov.enabled else "disabled"
         desc = f"<b>Overlay:</b> {status}"
-        if ov.enabled:
-            if ov.type == "text":
-                desc += f"\nType: text \u2014 <code>{ov.text}</code>"
-            else:
-                desc += f"\nType: image \u2014 <code>{os.path.basename(ov.path or '')}</code>"
-            desc += f"\nPosition: {ov.position}"
-            if ov.position == "custom":
-                desc += f" ({ov.x},{ov.y})"
-            desc += f"\nOpacity: {ov.opacity:.2f}"
-            if ov.type == "text":
-                desc += f"\nFont: {ov.font_size}px {ov.font_color}"
+        if ov.path:
+            desc += f"\n\U0001f5bc Image: <code>{os.path.basename(ov.path)}</code>"
+            if ov.image_max_height > 0:
+                desc += f" (max {ov.image_max_height}px)"
+        if ov.text:
+            desc += f"\n\U0001f4dd Text: <code>{ov.text}</code>"
+        if not ov.path and not ov.text:
+            desc += "\n(no layers configured)"
+        return desc
+
+    def _text_ov_image(self) -> str:
+        ov = self.cfg.overlay
+        desc = "\U0001f5bc <b>Overlay Image</b>\n"
+        if ov.path:
+            desc += f"File: <code>{os.path.basename(ov.path)}</code>\n"
+        else:
+            desc += "File: (not set)\n"
+        desc += f"Position: {ov.image_position}"
+        if ov.image_position == "custom":
+            desc += f" ({ov.image_x},{ov.image_y})"
+        desc += f"\nOpacity: {ov.image_opacity:.2f}"
+        mh = ov.image_max_height
+        desc += f"\nMax height: {f'{mh}px' if mh > 0 else 'original'}"
         return desc
 
     def _text_ov_text(self) -> str:
         ov = self.cfg.overlay
-        desc = f"\U0001f4dd <b>Overlay Text</b>\n"
+        desc = "\U0001f4dd <b>Overlay Text</b>\n"
         if ov.text:
             desc += f"Text: <code>{ov.text}</code>\n"
         else:
             desc += "Text: (not set)\n"
         desc += f"Size: {ov.font_size}px | Color: {ov.font_color}\n"
-        desc += f"Position: {ov.position}"
-        if ov.position == "custom":
-            desc += f" ({ov.x},{ov.y})"
-        desc += f"\nOpacity: {ov.opacity:.2f}"
+        desc += f"Position: {ov.text_position}"
+        if ov.text_position == "custom":
+            desc += f" ({ov.text_x},{ov.text_y})"
+        desc += f"\nOpacity: {ov.text_opacity:.2f}"
         if ov.font_path:
             desc += f"\nFont: <code>{os.path.basename(ov.font_path)}</code>"
         return desc
 
-    def _text_ov_pos(self) -> str:
+    def _text_ov_img_pos(self) -> str:
         ov = self.cfg.overlay
-        desc = f"\U0001f4cd <b>Overlay Position</b>\nCurrent: {ov.position}"
-        if ov.position == "custom":
-            desc += f" ({ov.x},{ov.y})"
+        desc = f"\U0001f4cd <b>Image Position</b>\nCurrent: {ov.image_position}"
+        if ov.image_position == "custom":
+            desc += f" ({ov.image_x},{ov.image_y})"
+        return desc
+
+    def _text_ov_txt_pos(self) -> str:
+        ov = self.cfg.overlay
+        desc = f"\U0001f4cd <b>Text Position</b>\nCurrent: {ov.text_position}"
+        if ov.text_position == "custom":
+            desc += f" ({ov.text_x},{ov.text_y})"
         return desc
 
     def _text_targets(self) -> str:
@@ -1556,8 +1658,16 @@ def _kb_ph_text(cfg: Config):
     return rows
 
 
+_POSITION_BACK = {
+    "phpos":    "phtxt:menu",
+    "ovimgpos": "ovimg:menu",
+    "ovtxtpos": "ovtxt:menu",
+}
+
+
 def _kb_position(prefix: str):
-    """Position preset keyboard. prefix is 'phpos' or 'ovpos'."""
+    """Position preset keyboard. prefix is 'phpos', 'ovimgpos', or 'ovtxtpos'."""
+    back = _POSITION_BACK.get(prefix, "menu:main")
     return [
         [
             _btn("\u2196 TL", f"{prefix}:top-left"),
@@ -1575,7 +1685,7 @@ def _kb_position(prefix: str):
             _btn("\u2198 BR", f"{prefix}:bottom-right"),
         ],
         [_btn("\U0001f4d0 Custom x,y", f"{prefix}:custom")],
-        [_btn("\u25c0\ufe0f Back", f"{prefix.replace('pos', '')}txt:menu" if "pos" in prefix else "menu:main")],
+        [_btn("\u25c0\ufe0f Back", back)],
     ]
 
 
@@ -1589,14 +1699,32 @@ def _kb_ov(cfg: Config):
     return [
         [toggle],
         [
+            _btn("\U0001f5bc Image \u25b8", "ovimg:menu"),
             _btn("\U0001f4dd Text \u25b8", "ovtxt:menu"),
-            _btn("\U0001f5bc Image", "ov:image"),
-        ],
-        [
-            _btn(f"\U0001f4a7 Opacity ({ov.opacity:.1f})", "ov:opacity"),
         ],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
     ]
+
+
+def _kb_ov_image(cfg: Config):
+    ov = cfg.overlay
+    mh = ov.image_max_height
+    mh_label = f"{mh}px" if mh > 0 else "orig"
+    rows = [
+        [
+            _btn("\U0001f4f7 Set image", "ovimg:set"),
+            _btn("\u274c Clear", "ovimg:clear"),
+        ],
+        [
+            _btn(f"\U0001f4cd Position ({ov.image_position})", "ovimg:pos"),
+        ],
+        [
+            _btn(f"\U0001f4a7 Opacity ({ov.image_opacity:.1f})", "ovimg:opacity"),
+            _btn(f"\U0001f4cf Max H ({mh_label})", "ovimg:maxh"),
+        ],
+        [_btn("\u25c0\ufe0f Overlay", "ov:menu")],
+    ]
+    return rows
 
 
 def _kb_ov_text(cfg: Config):
@@ -1604,19 +1732,17 @@ def _kb_ov_text(cfg: Config):
     return [
         [
             _btn("\u270f\ufe0f Content", "ovtxt:content"),
+            _btn("\u274c Clear", "ovtxt:clear"),
         ],
         [
             _btn(f"\U0001f524 Size ({ov.font_size})", "ovtxt:size"),
             _btn(f"\U0001f3a8 Color ({ov.font_color})", "ovtxt:color"),
         ],
         [
-            _btn(
-                f"\U0001f4cd Position ({ov.position})",
-                "ovtxt:pos",
-            ),
+            _btn(f"\U0001f4cd Position ({ov.text_position})", "ovtxt:pos"),
         ],
         [
-            _btn(f"\U0001f4a7 Opacity ({ov.opacity:.1f})", "ovtxt:opacity"),
+            _btn(f"\U0001f4a7 Opacity ({ov.text_opacity:.1f})", "ovtxt:opacity"),
             _btn("\U0001f4c1 Font", "ovtxt:font"),
         ],
         [_btn("\u25c0\ufe0f Overlay", "ov:menu")],
