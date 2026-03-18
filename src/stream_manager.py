@@ -36,7 +36,7 @@ from typing import Optional, Dict, List
 from config import Config
 from ffmpeg_cmd import (
     build_compositor_idle, build_compositor_live, build_compositor_audio_only,
-    build_output, file_has_audio, resize_overlay_image,
+    build_output, file_has_audio, prepare_image,
 )
 
 log = logging.getLogger("stream_manager")
@@ -525,6 +525,27 @@ class StreamManager:
     #  Compositor management                                               #
     # ------------------------------------------------------------------ #
 
+    async def _prepare_placeholder_image(self) -> Optional[str]:
+        """Pre-process placeholder image (scale+pad+opacity) if applicable."""
+        ph = self.cfg.placeholder
+        if ph.type != "image" or not ph.path:
+            return None
+        v = self.cfg.output.video
+        return await prepare_image(
+            ph.path, width=v.width, height=v.height, opacity=ph.opacity,
+        )
+
+    async def _prepare_overlay_image(self) -> Optional[str]:
+        """Pre-process overlay image (resize+opacity) if applicable."""
+        ov = self.cfg.overlay
+        if not ov.enabled or not ov.path:
+            return None
+        return await prepare_image(
+            ov.path,
+            max_height=ov.image_max_height if ov.image_max_height > 0 else 0,
+            opacity=ov.image_opacity,
+        )
+
     async def _start_compositor_idle(self) -> None:
         try:
             ph = self.cfg.placeholder
@@ -533,7 +554,11 @@ class StreamManager:
                 if ph.type == "video" and ph.path
                 else False
             )
-            cmd = build_compositor_idle(self.cfg, video_has_audio=has_audio)
+            ph_img = await self._prepare_placeholder_image()
+            cmd = build_compositor_idle(
+                self.cfg, video_has_audio=has_audio,
+                placeholder_image_path=ph_img,
+            )
         except Exception as e:
             log.error("Failed to build idle compositor command: %s", e)
             self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
@@ -542,12 +567,7 @@ class StreamManager:
 
     async def _start_compositor_live(self, info: StreamInfo) -> None:
         try:
-            ov = self.cfg.overlay
-            overlay_img = None
-            if ov.enabled and ov.path and ov.image_max_height > 0:
-                overlay_img = await resize_overlay_image(
-                    ov.path, ov.image_max_height,
-                )
+            overlay_img = await self._prepare_overlay_image()
             cmd = build_compositor_live(
                 self.cfg, info.path, info.has_audio,
                 overlay_image_path=overlay_img,
@@ -567,8 +587,10 @@ class StreamManager:
                 if ph.type == "video" and ph.path
                 else False
             )
+            ph_img = await self._prepare_placeholder_image()
             cmd = build_compositor_audio_only(
                 self.cfg, info.path, video_has_audio=ph_has_audio,
+                placeholder_image_path=ph_img,
             )
         except Exception as e:
             log.error("Failed to build audio-only compositor: %s", e)
