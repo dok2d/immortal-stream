@@ -528,11 +528,12 @@ class StreamManager:
     async def _prepare_placeholder_image(self) -> Optional[str]:
         """Pre-process placeholder image (scale+pad+opacity) if applicable."""
         ph = self.cfg.placeholder
-        if ph.type != "image" or not ph.path:
+        if not ph.image_path:
             return None
         v = self.cfg.output.video
         return await prepare_image(
-            ph.path, width=v.width, height=v.height, opacity=ph.opacity,
+            ph.image_path, width=v.width, height=v.height,
+            opacity=ph.image_opacity,
         )
 
     async def _prepare_overlay_image(self) -> Optional[str]:
@@ -550,8 +551,8 @@ class StreamManager:
         try:
             ph = self.cfg.placeholder
             has_audio = (
-                await file_has_audio(ph.path)
-                if ph.type == "video" and ph.path
+                await file_has_audio(ph.video_path)
+                if ph.video_path
                 else False
             )
             ph_img = await self._prepare_placeholder_image()
@@ -579,12 +580,12 @@ class StreamManager:
         await self._replace_compositor(cmd, f"LIVE({info.path})")
 
     async def _start_compositor_audio_only(self, info: StreamInfo) -> None:
-        """Audio-only mode: placeholder video + incoming audio."""
+        """Audio-only mode: placeholder video layers + incoming audio."""
         try:
             ph = self.cfg.placeholder
             ph_has_audio = (
-                await file_has_audio(ph.path)
-                if ph.type == "video" and ph.path
+                await file_has_audio(ph.video_path)
+                if ph.video_path
                 else False
             )
             ph_img = await self._prepare_placeholder_image()
@@ -837,6 +838,8 @@ async def _log_stderr(
             "Last message repeated",
             "non-existing PPS",
             "decode_slice_header",
+            "co located POCs",
+            "mmco:",
             "no frame!",
             "Packet corrupt",
             "corrupt input packet",

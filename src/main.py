@@ -90,7 +90,7 @@ async def main() -> None:
         sys.exit(1)
 
     # -- Restore saved runtime state (bot settings) -------------------------
-    state_path = STATE_PATH or "/var/lib/immortal-stream/state.yaml"
+    state_path = STATE_PATH or "/tmp/immortal-stream/state.yaml"
     if load_state(cfg, state_path):
         log.info("Restored runtime state from %s", state_path)
 
@@ -109,7 +109,7 @@ async def main() -> None:
         cfg.ingest.port,
         cfg.ingest.srt_port,
         len(cfg.output.targets),
-        cfg.placeholder.type,
+        cfg.placeholder.background,
     )
 
     # -- Telegram notifier -------------------------------------------------
@@ -156,7 +156,10 @@ async def main() -> None:
         f"Ingest RTMP: :{cfg.ingest.port}\n"
         f"Ingest SRT:  :{cfg.ingest.srt_port}"
         f"{hls_line}{key_line}\n"
-        f"Placeholder: {cfg.placeholder.type}\n"
+        f"Placeholder: bg={cfg.placeholder.background}"
+        f"{' +img' if cfg.placeholder.image_path else ''}"
+        f"{' +vid' if cfg.placeholder.video_path else ''}"
+        f"{' +txt' if cfg.placeholder.text else ''}\n"
         f"Overlay: {'enabled' if cfg.overlay.enabled else 'disabled'}\n"
         f"Targets:\n{target_list}"
     )

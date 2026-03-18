@@ -265,6 +265,8 @@ class TelegramBot:
             "menu":   self._cb_menu,
             "status": self._cb_status,
             "ph":     self._cb_placeholder,
+            "phimg":  self._cb_ph_image,
+            "phvid":  self._cb_ph_video,
             "phtxt":  self._cb_ph_text,
             "phpos":  self._cb_ph_pos,
             "ov":       self._cb_overlay,
@@ -416,31 +418,65 @@ class TelegramBot:
             return self._text_ph(), _kb_ph(self.cfg), ""
 
         if act == "black":
-            self.cfg.placeholder.type = "black"
-            self.cfg.placeholder.path = None
+            self.cfg.placeholder.background = "black"
             await self._reload_compositor()
             return (
-                self._text_ph() + "\n\n\u2705 Black screen",
+                self._text_ph() + "\n\n\u2705 Background: black",
                 _kb_ph(self.cfg), "Black",
             )
 
         if act == "testcard":
-            self.cfg.placeholder.type = "testcard"
-            self.cfg.placeholder.path = None
+            self.cfg.placeholder.background = "testcard"
             await self._reload_compositor()
             return (
-                self._text_ph() + "\n\n\u2705 Test card",
+                self._text_ph() + "\n\n\u2705 Background: testcard",
                 _kb_ph(self.cfg), "Testcard",
             )
 
-        if act == "image":
+        return self._text_ph(), _kb_ph(self.cfg), ""
+
+    # -- Placeholder Image submenu -----------------------------------------
+
+    async def _cb_ph_image(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_image(), _kb_ph_image(self.cfg), ""
+
+        if act == "set":
             self._awaiting = "ph:image"
             await self._send_prompt(
                 "\U0001f4f7 Send a photo, or a file path on the server:"
             )
             return None, None, ""
 
-        if act == "video":
+        if act == "clear":
+            self.cfg.placeholder.image_path = None
+            await self._reload_compositor()
+            return (
+                self._text_ph_image() + "\n\n\u2705 Image removed",
+                _kb_ph_image(self.cfg), "Removed",
+            )
+
+        if act == "opacity":
+            self._awaiting = "ph:imgopacity"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.image_opacity:.2f}\n"
+                "Send new value (0.0\u20131.0):"
+            )
+            return None, None, ""
+
+        return self._text_ph_image(), _kb_ph_image(self.cfg), ""
+
+    # -- Placeholder Video submenu -----------------------------------------
+
+    async def _cb_ph_video(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_video(), _kb_ph_video(self.cfg), ""
+
+        if act == "set":
             self._awaiting = "ph:video"
             await self._send_prompt(
                 "\U0001f3ac Send a video file, or a file path on the server:\n"
@@ -448,15 +484,15 @@ class TelegramBot:
             )
             return None, None, ""
 
-        if act == "opacity":
-            self._awaiting = "ph:opacity"
-            await self._send_prompt(
-                f"Current: {self.cfg.placeholder.opacity:.2f}\n"
-                "Send new value (0.0\u20131.0):"
+        if act == "clear":
+            self.cfg.placeholder.video_path = None
+            await self._reload_compositor()
+            return (
+                self._text_ph_video() + "\n\n\u2705 Video removed",
+                _kb_ph_video(self.cfg), "Removed",
             )
-            return None, None, ""
 
-        return self._text_ph(), _kb_ph(self.cfg), ""
+        return self._text_ph_video(), _kb_ph_video(self.cfg), ""
 
     # -- Placeholder Text submenu ------------------------------------------
 
@@ -506,7 +542,7 @@ class TelegramBot:
         if act == "opacity":
             self._awaiting = "ph:textopacity"
             await self._send_prompt(
-                f"Current: {self.cfg.placeholder.opacity:.2f}\n"
+                f"Current: {self.cfg.placeholder.text_opacity:.2f}\n"
                 "Send text opacity (0.0\u20131.0):"
             )
             return None, None, ""
@@ -830,29 +866,36 @@ class TelegramBot:
                 _kb_ph_text(self.cfg),
             )
 
-        if action in ("ph:image", "ph:video"):
-            kind = action.split(":")[1]
+        if action == "ph:image":
             if not os.path.isfile(text):
-                return f"\u274c File not found: <code>{text}</code>", _kb_ph(self.cfg)
-            self.cfg.placeholder.type = kind
-            self.cfg.placeholder.path = text
+                return f"\u274c File not found: <code>{text}</code>", _kb_ph_image(self.cfg)
+            self.cfg.placeholder.image_path = text
             await self._reload_compositor()
-            label = "\U0001f5bc" if kind == "image" else "\U0001f3ac"
             return (
-                f"\u2705 Placeholder {kind}:\n{label} <code>{text}</code>",
-                _kb_ph(self.cfg),
+                f"\u2705 Placeholder image:\n\U0001f5bc <code>{text}</code>",
+                _kb_ph_image(self.cfg),
             )
 
-        if action == "ph:opacity":
+        if action == "ph:video":
+            if not os.path.isfile(text):
+                return f"\u274c File not found: <code>{text}</code>", _kb_ph_video(self.cfg)
+            self.cfg.placeholder.video_path = text
+            await self._reload_compositor()
+            return (
+                f"\u2705 Placeholder video:\n\U0001f3ac <code>{text}</code>",
+                _kb_ph_video(self.cfg),
+            )
+
+        if action == "ph:imgopacity":
             try:
                 v = float(text)
             except (ValueError, TypeError):
-                return "\u274c Must be a number 0.0\u20131.0", _kb_ph(self.cfg)
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ph_image(self.cfg)
             if not 0.0 <= v <= 1.0:
-                return "\u274c Must be 0.0\u20131.0", _kb_ph(self.cfg)
-            self.cfg.placeholder.opacity = v
+                return "\u274c Must be 0.0\u20131.0", _kb_ph_image(self.cfg)
+            self.cfg.placeholder.image_opacity = v
             await self._reload_compositor()
-            return f"\u2705 Opacity: {v:.2f}", _kb_ph(self.cfg)
+            return f"\u2705 Image opacity: {v:.2f}", _kb_ph_image(self.cfg)
 
         if action == "ph:fontsize":
             try:
@@ -877,7 +920,7 @@ class TelegramBot:
                 return "\u274c Must be a number 0.0\u20131.0", _kb_ph_text(self.cfg)
             if not 0.0 <= v <= 1.0:
                 return "\u274c Must be 0.0\u20131.0", _kb_ph_text(self.cfg)
-            self.cfg.placeholder.opacity = v
+            self.cfg.placeholder.text_opacity = v
             await self._reload_compositor()
             return f"\u2705 Text opacity: {v:.2f}", _kb_ph_text(self.cfg)
 
@@ -901,8 +944,8 @@ class TelegramBot:
             except (ValueError, TypeError):
                 return "\u274c Coordinates must be integers", _kb_position("phpos")
             self.cfg.placeholder.text_position = "custom"
-            self.cfg.placeholder.x = x
-            self.cfg.placeholder.y = y
+            self.cfg.placeholder.text_x = x
+            self.cfg.placeholder.text_y = y
             await self._reload_compositor()
             return f"\u2705 Position: ({x},{y})", _kb_position("phpos")
 
@@ -1144,17 +1187,10 @@ class TelegramBot:
 
         sub = args[0].lower()
 
-        if sub == "black":
-            self.cfg.placeholder.type = "black"
-            self.cfg.placeholder.path = None
+        if sub in ("black", "testcard"):
+            self.cfg.placeholder.background = sub
             await self._reload_compositor()
-            return "\u2705 Placeholder \u2192 black"
-
-        if sub == "testcard":
-            self.cfg.placeholder.type = "testcard"
-            self.cfg.placeholder.path = None
-            await self._reload_compositor()
-            return "\u2705 Placeholder \u2192 testcard"
+            return f"\u2705 Background \u2192 {sub}"
 
         if sub == "text":
             text = arg_str[len("text"):].strip().strip("\"'")
@@ -1166,23 +1202,40 @@ class TelegramBot:
                 return "\u2705 Placeholder text removed"
             self.cfg.placeholder.text = text
             await self._reload_compositor()
-            return f"\u2705 Placeholder text overlay: <code>{text}</code>"
+            return f"\u2705 Placeholder text: <code>{text}</code>"
 
-        if sub in ("image", "video"):
-            path = arg_str[len(sub):].strip()
+        if sub == "image":
+            path = arg_str[len("image"):].strip()
             if not path:
-                return f"Usage: /placeholder {sub} <path>"
+                return "Usage: /placeholder image <path>  (or 'off' to remove)"
+            if path.lower() == "off":
+                self.cfg.placeholder.image_path = None
+                await self._reload_compositor()
+                return "\u2705 Placeholder image removed"
             if not os.path.isfile(path):
                 return f"\u274c File not found: <code>{path}</code>"
-            self.cfg.placeholder.type = sub
-            self.cfg.placeholder.path = path
+            self.cfg.placeholder.image_path = path
             await self._reload_compositor()
-            return f"\u2705 Placeholder \u2192 {sub}: <code>{path}</code>"
+            return f"\u2705 Placeholder image: <code>{path}</code>"
+
+        if sub == "video":
+            path = arg_str[len("video"):].strip()
+            if not path:
+                return "Usage: /placeholder video <path>  (or 'off' to remove)"
+            if path.lower() == "off":
+                self.cfg.placeholder.video_path = None
+                await self._reload_compositor()
+                return "\u2705 Placeholder video removed"
+            if not os.path.isfile(path):
+                return f"\u274c File not found: <code>{path}</code>"
+            self.cfg.placeholder.video_path = path
+            await self._reload_compositor()
+            return f"\u2705 Placeholder video: <code>{path}</code>"
 
         if sub == "opacity":
             return await _set_float(
-                args, self.cfg.placeholder, "opacity",
-                0.0, 1.0, self._reload_compositor, "Opacity",
+                args, self.cfg.placeholder, "image_opacity",
+                0.0, 1.0, self._reload_compositor, "Image opacity",
             )
 
         if sub in ("pos", "position"):
@@ -1212,8 +1265,8 @@ class TelegramBot:
                 except ValueError:
                     return "\u274c Coordinates must be integers"
                 self.cfg.placeholder.text_position = "custom"
-                self.cfg.placeholder.x = x
-                self.cfg.placeholder.y = y
+                self.cfg.placeholder.text_x = x
+                self.cfg.placeholder.text_y = y
                 await self._reload_compositor()
                 return f"\u2705 Text position: custom ({x},{y})"
             return f"\u274c Unknown position: <code>{val}</code>"
@@ -1457,17 +1510,21 @@ class TelegramBot:
         else:
             state = "\u26ab <b>IDLE</b> (placeholder active)"
 
-        ph_desc = ph.type
-        if ph.path:
-            ph_desc += f": <code>{os.path.basename(ph.path)}</code>"
+        ph_desc = f"bg={ph.background}"
+        if ph.image_path:
+            ph_desc += f"\n  image: <code>{os.path.basename(ph.image_path)}</code>"
+            if ph.image_opacity < 1.0:
+                ph_desc += f" opacity={ph.image_opacity:.2f}"
+        if ph.video_path:
+            ph_desc += f"\n  video: <code>{os.path.basename(ph.video_path)}</code>"
         if ph.text:
             ph_desc += f"\n  text: <code>{ph.text}</code>"
             pos_str = ph.text_position
             if pos_str == "custom":
-                pos_str += f" ({ph.x},{ph.y})"
+                pos_str += f" ({ph.text_x},{ph.text_y})"
             ph_desc += f" [{pos_str}]"
-        if ph.opacity < 1.0:
-            ph_desc += f" opacity={ph.opacity:.2f}"
+            if ph.text_opacity < 1.0:
+                ph_desc += f" opacity={ph.text_opacity:.2f}"
 
         if ov.enabled:
             parts = []
@@ -1518,12 +1575,33 @@ class TelegramBot:
 
     def _text_ph(self) -> str:
         ph = self.cfg.placeholder
-        desc = f"<b>Placeholder:</b> {ph.type}"
-        if ph.path:
-            desc += f"\nFile: <code>{os.path.basename(ph.path)}</code>"
+        desc = f"<b>Placeholder</b>\nBackground: {ph.background}"
+        if ph.image_path:
+            desc += f"\n\U0001f5bc Image: <code>{os.path.basename(ph.image_path)}</code>"
+            desc += f" (opacity: {ph.image_opacity:.2f})"
+        if ph.video_path:
+            desc += f"\n\U0001f3ac Video: <code>{os.path.basename(ph.video_path)}</code>"
         if ph.text:
-            desc += f"\nText: <code>{ph.text}</code>"
-        desc += f"\nOpacity: {ph.opacity:.2f}"
+            desc += f"\n\U0001f4dd Text: <code>{ph.text}</code>"
+        return desc
+
+    def _text_ph_image(self) -> str:
+        ph = self.cfg.placeholder
+        if ph.image_path:
+            desc = f"\U0001f5bc <b>Placeholder Image</b>\n"
+            desc += f"File: <code>{os.path.basename(ph.image_path)}</code>\n"
+            desc += f"Opacity: {ph.image_opacity:.2f}"
+        else:
+            desc = "\U0001f5bc <b>Placeholder Image</b>\nNo image configured"
+        return desc
+
+    def _text_ph_video(self) -> str:
+        ph = self.cfg.placeholder
+        if ph.video_path:
+            desc = f"\U0001f3ac <b>Placeholder Video</b>\n"
+            desc += f"File: <code>{os.path.basename(ph.video_path)}</code>"
+        else:
+            desc = "\U0001f3ac <b>Placeholder Video</b>\nNo video configured"
         return desc
 
     def _text_ph_text(self) -> str:
@@ -1534,8 +1612,8 @@ class TelegramBot:
             desc += f"Size: {ph.font_size}px | Color: {ph.font_color}\n"
             desc += f"Position: {ph.text_position}"
             if ph.text_position == "custom":
-                desc += f" ({ph.x},{ph.y})"
-            desc += f"\nOpacity: {ph.opacity:.2f}"
+                desc += f" ({ph.text_x},{ph.text_y})"
+            desc += f"\nOpacity: {ph.text_opacity:.2f}"
             if ph.font_path:
                 desc += f"\nFont: <code>{os.path.basename(ph.font_path)}</code>"
         else:
@@ -1546,7 +1624,7 @@ class TelegramBot:
         ph = self.cfg.placeholder
         desc = f"\U0001f4cd <b>Text Position</b>\nCurrent: {ph.text_position}"
         if ph.text_position == "custom":
-            desc += f" ({ph.x},{ph.y})"
+            desc += f" ({ph.text_x},{ph.text_y})"
         return desc
 
     def _text_ov(self) -> str:
@@ -1676,22 +1754,45 @@ def _kb_status():
 
 def _kb_ph(cfg: Config):
     ph = cfg.placeholder
-    check = lambda t: " \u2705" if ph.type == t else ""
-    text_label = "\U0001f4dd Text \u25b8" if ph.text else "\U0001f4dd Text \u25b8"
+    bg_check = lambda t: " \u2705" if ph.background == t else ""
+    img_label = "\U0001f5bc Image \u2705" if ph.image_path else "\U0001f5bc Image"
+    vid_label = "\U0001f3ac Video \u2705" if ph.video_path else "\U0001f3ac Video"
+    txt_label = "\U0001f4dd Text \u2705" if ph.text else "\U0001f4dd Text"
     rows = [
         [
-            _btn(f"\u2b1b Black{check('black')}", "ph:black"),
-            _btn(f"\U0001f4fa Testcard{check('testcard')}", "ph:testcard"),
+            _btn(f"\u2b1b Black{bg_check('black')}", "ph:black"),
+            _btn(f"\U0001f4fa Testcard{bg_check('testcard')}", "ph:testcard"),
         ],
         [
-            _btn(f"\U0001f5bc Image{check('image')}", "ph:image"),
-            _btn(f"\U0001f3ac Video{check('video')}", "ph:video"),
+            _btn(f"{img_label} \u25b8", "phimg:menu"),
+            _btn(f"{vid_label} \u25b8", "phvid:menu"),
         ],
-        [
-            _btn(text_label, "phtxt:menu"),
-            _btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "ph:opacity"),
-        ],
+        [_btn(f"{txt_label} \u25b8", "phtxt:menu")],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
+    ]
+    return rows
+
+
+def _kb_ph_image(cfg: Config):
+    ph = cfg.placeholder
+    rows = [
+        [
+            _btn("\U0001f4f7 Set image", "phimg:set"),
+            _btn("\u274c Remove", "phimg:clear"),
+        ],
+        [_btn(f"\U0001f4a7 Opacity ({ph.image_opacity:.1f})", "phimg:opacity")],
+        [_btn("\u25c0\ufe0f Placeholder", "ph:menu")],
+    ]
+    return rows
+
+
+def _kb_ph_video(cfg: Config):
+    rows = [
+        [
+            _btn("\U0001f3ac Set video", "phvid:set"),
+            _btn("\u274c Remove", "phvid:clear"),
+        ],
+        [_btn("\u25c0\ufe0f Placeholder", "ph:menu")],
     ]
     return rows
 
@@ -1714,7 +1815,7 @@ def _kb_ph_text(cfg: Config):
             ),
         ],
         [
-            _btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "phtxt:opacity"),
+            _btn(f"\U0001f4a7 Opacity ({ph.text_opacity:.1f})", "phtxt:opacity"),
             _btn("\U0001f4c1 Font", "phtxt:font"),
         ],
         [_btn("\u25c0\ufe0f Placeholder", "ph:menu")],

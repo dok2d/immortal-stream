@@ -11,7 +11,7 @@ import yaml
 
 log = logging.getLogger("config")
 
-_VALID_PLACEHOLDER_TYPES = {"black", "image", "video", "testcard"}
+_VALID_BACKGROUNDS = {"black", "testcard"}
 _VALID_OVERLAY_TYPES = {"image", "text"}  # legacy, kept for config compat
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _X264_PRESETS = {
@@ -34,16 +34,22 @@ POSITION_PRESETS = (
 
 @dataclass
 class PlaceholderConfig:
-    type: str = "testcard"
-    path: Optional[str] = None
+    # Base background (always present as the bottom layer)
+    background: str = "black"       # "black" | "testcard"
+    # Image layer (overlaid on background, scaled to output resolution)
+    image_path: Optional[str] = None
+    image_opacity: float = 1.0
+    # Video layer (overlaid on image, scaled to output resolution)
+    video_path: Optional[str] = None
+    # Text layer (overlaid on everything)
     text: Optional[str] = None
     font_path: Optional[str] = None
     font_size: int = 72
     font_color: str = "white"
     text_position: str = "center"
-    x: int = 0
-    y: int = 0
-    opacity: float = 1.0
+    text_x: int = 0
+    text_y: int = 0
+    text_opacity: float = 1.0
 
 
 @dataclass
@@ -140,15 +146,19 @@ def _populate(cls, data: dict):
 def _validate(cfg: Config) -> None:
     """Validate configuration values after loading."""
     ph = cfg.placeholder
-    if ph.type not in _VALID_PLACEHOLDER_TYPES:
+    if ph.background not in _VALID_BACKGROUNDS:
         raise ValueError(
-            f"placeholder.type must be one of {_VALID_PLACEHOLDER_TYPES}, "
-            f"got {ph.type!r}"
+            f"placeholder.background must be one of {_VALID_BACKGROUNDS}, "
+            f"got {ph.background!r}"
         )
-    if ph.type in ("image", "video") and not ph.path:
-        raise ValueError(f"placeholder.path is required for type={ph.type!r}")
-    if not 0.0 <= ph.opacity <= 1.0:
-        raise ValueError(f"placeholder.opacity must be 0.0–1.0, got {ph.opacity}")
+    if not 0.0 <= ph.image_opacity <= 1.0:
+        raise ValueError(
+            f"placeholder.image_opacity must be 0.0–1.0, got {ph.image_opacity}"
+        )
+    if not 0.0 <= ph.text_opacity <= 1.0:
+        raise ValueError(
+            f"placeholder.text_opacity must be 0.0–1.0, got {ph.text_opacity}"
+        )
 
     ov = cfg.overlay
     if not 0.0 <= ov.image_opacity <= 1.0:
@@ -203,10 +213,13 @@ def _validate(cfg: Config) -> None:
         cfg.log_level = "INFO"
 
     # Validate placeholder/overlay file existence
-    if ph.type in ("image", "video") and ph.path and not os.path.isfile(ph.path):
+    if ph.image_path and not os.path.isfile(ph.image_path):
         raise ValueError(
-            f"placeholder.path {ph.path!r} does not exist "
-            f"(required for type={ph.type!r})"
+            f"placeholder.image_path {ph.image_path!r} does not exist"
+        )
+    if ph.video_path and not os.path.isfile(ph.video_path):
+        raise ValueError(
+            f"placeholder.video_path {ph.video_path!r} does not exist"
         )
     if ov.enabled and ov.path and not os.path.isfile(ov.path):
         raise ValueError(f"overlay.path {ov.path!r} does not exist")
@@ -223,6 +236,46 @@ def _validate(cfg: Config) -> None:
 # ---------------------------------------------------------------------------
 #  Public API
 # ---------------------------------------------------------------------------
+
+def _migrate_placeholder(p: dict) -> None:
+    """Migrate legacy placeholder format to layered fields.
+
+    Legacy: type + path + opacity + x + y
+    New:    background + image_path + image_opacity + video_path
+            + text_x + text_y + text_opacity
+    """
+    if "type" in p:
+        old_type = p.pop("type")
+        old_path = p.pop("path", None)
+        if old_type in ("black", "testcard"):
+            p.setdefault("background", old_type)
+        elif old_type == "image":
+            p.setdefault("background", "black")
+            if old_path:
+                p.setdefault("image_path", old_path)
+        elif old_type == "video":
+            p.setdefault("background", "black")
+            if old_path:
+                p.setdefault("video_path", old_path)
+    # Remove leftover "path" from legacy
+    p.pop("path", None)
+    # opacity → image_opacity
+    if "opacity" in p:
+        p.setdefault("image_opacity", float(p.pop("opacity")))
+    # x/y → text_x/text_y
+    if "x" in p and "text_x" not in p:
+        p["text_x"] = p.pop("x")
+    else:
+        p.pop("x", None)
+    if "y" in p and "text_y" not in p:
+        p["text_y"] = p.pop("y")
+    else:
+        p.pop("y", None)
+    # Ensure float types
+    for k in ("image_opacity", "text_opacity"):
+        if k in p:
+            p[k] = float(p[k])
+
 
 def load_config(path: str) -> Config:
     """Load configuration from a YAML file, validate, and return a Config."""
@@ -242,8 +295,7 @@ def load_config(path: str) -> Config:
 
     if "placeholder" in data:
         p = data["placeholder"]
-        if "opacity" in p:
-            p["opacity"] = float(p["opacity"])
+        _migrate_placeholder(p)
         cfg.placeholder = _populate(PlaceholderConfig, p)
 
     if "overlay" in data:
@@ -341,18 +393,17 @@ def load_state(cfg: Config, path: str) -> bool:
 
     if "placeholder" in data and isinstance(data["placeholder"], dict):
         p = data["placeholder"]
-        if "opacity" in p:
-            p["opacity"] = float(p["opacity"])
-        # Validate file existence — fall back to base config if missing
-        ph_type = p.get("type", cfg.placeholder.type)
-        ph_path = p.get("path")
-        if ph_type in ("image", "video") and ph_path and not os.path.isfile(ph_path):
-            log.warning(
-                "State placeholder.path %r no longer exists — "
-                "falling back to base config placeholder", ph_path,
-            )
-        else:
-            cfg.placeholder = _populate(PlaceholderConfig, p)
+        _migrate_placeholder(p)
+        # Validate file existence — skip missing files
+        img = p.get("image_path")
+        if img and not os.path.isfile(img):
+            log.warning("State placeholder.image_path %r missing — ignoring", img)
+            p.pop("image_path")
+        vid = p.get("video_path")
+        if vid and not os.path.isfile(vid):
+            log.warning("State placeholder.video_path %r missing — ignoring", vid)
+            p.pop("video_path")
+        cfg.placeholder = _populate(PlaceholderConfig, p)
 
     if "overlay" in data and isinstance(data["overlay"], dict):
         o = data["overlay"]
