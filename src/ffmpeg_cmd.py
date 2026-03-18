@@ -6,6 +6,9 @@ from config import Config, VideoConfig, PlaceholderConfig
 # Default font for drawtext when no font_path is configured.
 DEFAULT_FONT = "/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
 
+# Directory for pre-resized overlay images.
+_OVERLAY_CACHE_DIR = "/tmp/immortal-stream"
+
 
 # ---------------------------------------------------------------------------
 #  Internal helpers
@@ -195,6 +198,52 @@ def _anullsrc(sample_rate: int) -> List[str]:
     return ["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=stereo"]
 
 
+async def resize_overlay_image(src: str, max_height: int) -> str:
+    """Pre-resize overlay image to max_height, return path to resized file.
+
+    Runs ffmpeg once at compositor start instead of scaling every frame
+    in the filter_complex.  Result is cached in _OVERLAY_CACHE_DIR.
+    """
+    import asyncio
+    import hashlib
+    import os
+
+    os.makedirs(_OVERLAY_CACHE_DIR, exist_ok=True)
+
+    # Deterministic cache filename based on source path, mtime, and target height
+    stat = os.stat(src)
+    key = f"{src}:{stat.st_mtime}:{max_height}"
+    h = hashlib.md5(key.encode()).hexdigest()[:12]
+    ext = os.path.splitext(src)[1] or ".png"
+    dst = os.path.join(_OVERLAY_CACHE_DIR, f"ov_{h}{ext}")
+
+    if os.path.isfile(dst):
+        return dst
+
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", src,
+        "-vf", f"scale=-1:{max_height}:force_original_aspect_ratio=decrease",
+        "-frames:v", "1",
+        "-y", dst,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return src  # fallback to original
+    if proc.returncode != 0:
+        import logging
+        logging.getLogger("ffmpeg_cmd").warning(
+            "Overlay resize failed (code %d): %s", proc.returncode,
+            (stderr or b"").decode(errors="replace")[:200],
+        )
+        return src  # fallback to original
+    return dst
+
+
 async def file_has_audio(path: str) -> bool:
     """Async ffprobe check for an audio stream in a local file."""
     import asyncio
@@ -357,11 +406,15 @@ def build_compositor_live(
     cfg: Config,
     stream_path: str,
     has_audio: bool,
+    overlay_image_path: Optional[str] = None,
 ) -> List[str]:
     """Compositor command for LIVE state.
 
     Reads incoming stream from mediamtx (RTSP), applies optional overlay,
     and outputs to the internal UDP/MPEG-TS destination.
+
+    overlay_image_path: pre-resized overlay image (if image_max_height > 0).
+        When provided, no runtime scaling is applied in the filter chain.
     """
     v = cfg.output.video
     a = cfg.output.audio
@@ -381,21 +434,16 @@ def build_compositor_live(
 
     # Overlay layers (only in LIVE mode) — image and text are independent
     if ov.enabled:
-        # Layer 1: image overlay
-        if ov.path:
-            cmd += ["-loop", "1", "-i", ov.path]
-            scale = ""
-            if ov.image_max_height > 0:
-                scale = (
-                    f",scale=-1:{ov.image_max_height}"
-                    f":force_original_aspect_ratio=decrease"
-                )
+        # Layer 1: image overlay (pre-resized, no runtime scale)
+        img_path = overlay_image_path or ov.path
+        if img_path:
+            cmd += ["-loop", "1", "-i", img_path]
             alpha = (
                 f",colorchannelmixer=aa={ov.image_opacity:.3f}"
                 if ov.image_opacity < 1.0 else ""
             )
             filters.append(
-                f"[{input_idx}:v]format=rgba{scale}{alpha}[ov_img]"
+                f"[{input_idx}:v]format=rgba{alpha}[ov_img]"
             )
             ox, oy = _resolve_overlay_pos(
                 ov.image_position, ov.image_x, ov.image_y,

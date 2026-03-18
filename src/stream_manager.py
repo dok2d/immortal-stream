@@ -36,7 +36,7 @@ from typing import Optional, Dict, List
 from config import Config
 from ffmpeg_cmd import (
     build_compositor_idle, build_compositor_live, build_compositor_audio_only,
-    build_output, file_has_audio,
+    build_output, file_has_audio, resize_overlay_image,
 )
 
 log = logging.getLogger("stream_manager")
@@ -542,7 +542,16 @@ class StreamManager:
 
     async def _start_compositor_live(self, info: StreamInfo) -> None:
         try:
-            cmd = build_compositor_live(self.cfg, info.path, info.has_audio)
+            ov = self.cfg.overlay
+            overlay_img = None
+            if ov.enabled and ov.path and ov.image_max_height > 0:
+                overlay_img = await resize_overlay_image(
+                    ov.path, ov.image_max_height,
+                )
+            cmd = build_compositor_live(
+                self.cfg, info.path, info.has_audio,
+                overlay_image_path=overlay_img,
+            )
         except Exception as e:
             log.error("Failed to build live compositor command: %s", e)
             self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
