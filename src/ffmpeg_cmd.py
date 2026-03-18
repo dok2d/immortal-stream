@@ -402,8 +402,21 @@ def build_compositor_idle(
         img = placeholder_image_path or ph.image_path
         cmd += ["-loop", "1", "-i", img]
         if placeholder_image_path:
+            # Pre-processed (full-frame or max_height + opacity baked)
             filters.append(f"[{input_idx}:v]format=rgba[ph_img]")
+        elif ph.image_max_height > 0:
+            # Positioned mode: scale to max height
+            alpha = (
+                f",colorchannelmixer=aa={ph.image_opacity:.3f}"
+                if ph.image_opacity < 1.0 else ""
+            )
+            filters.append(
+                f"[{input_idx}:v]scale=-1:{ph.image_max_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"format=rgba{alpha}[ph_img]"
+            )
         else:
+            # Full frame: scale+pad to output resolution
             filters.append(_scale_pad(v, f"{input_idx}:v", "ph_iscaled"))
             if ph.image_opacity < 1.0:
                 filters.append(
@@ -412,7 +425,13 @@ def build_compositor_idle(
                 )
             else:
                 filters.append("[ph_iscaled]format=rgba[ph_img]")
-        filters.append(f"[{last_v}][ph_img]overlay=0:0[vimg]")
+        if ph.image_max_height > 0 and not placeholder_image_path:
+            ox, oy = _resolve_overlay_pos(
+                ph.image_position, ph.image_x, ph.image_y,
+            )
+        else:
+            ox, oy = "0", "0"
+        filters.append(f"[{last_v}][ph_img]overlay={ox}:{oy}[vimg]")
         last_v = "vimg"
         input_idx += 1
 
@@ -420,8 +439,30 @@ def build_compositor_idle(
     if ph.video_path:
         cmd += ["-re", "-stream_loop", "-1", "-i", ph.video_path]
         vid_idx = input_idx
-        filters.append(_scale_pad(v, f"{vid_idx}:v", "ph_vid"))
-        filters.append(f"[{last_v}][ph_vid]overlay=0:0[vvid]")
+        if ph.video_max_height > 0:
+            alpha = (
+                f",colorchannelmixer=aa={ph.video_opacity:.3f}"
+                if ph.video_opacity < 1.0 else ""
+            )
+            filters.append(
+                f"[{vid_idx}:v]scale=-1:{ph.video_max_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"format=rgba{alpha}[ph_vid]"
+            )
+            ox, oy = _resolve_overlay_pos(
+                ph.video_position, ph.video_x, ph.video_y,
+            )
+        else:
+            filters.append(_scale_pad(v, f"{vid_idx}:v", "ph_vscaled"))
+            if ph.video_opacity < 1.0:
+                filters.append(
+                    f"[ph_vscaled]format=rgba,"
+                    f"colorchannelmixer=aa={ph.video_opacity:.3f}[ph_vid]"
+                )
+            else:
+                filters.append("[ph_vscaled]copy[ph_vid]")
+            ox, oy = "0", "0"
+        filters.append(f"[{last_v}][ph_vid]overlay={ox}:{oy}[vvid]")
         last_v = "vvid"
         if video_has_audio:
             filters.append(
@@ -606,6 +647,16 @@ def build_compositor_audio_only(
         cmd += ["-loop", "1", "-i", img]
         if placeholder_image_path:
             filters.append(f"[{input_idx}:v]format=rgba[ph_img]")
+        elif ph.image_max_height > 0:
+            alpha = (
+                f",colorchannelmixer=aa={ph.image_opacity:.3f}"
+                if ph.image_opacity < 1.0 else ""
+            )
+            filters.append(
+                f"[{input_idx}:v]scale=-1:{ph.image_max_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"format=rgba{alpha}[ph_img]"
+            )
         else:
             filters.append(_scale_pad(v, f"{input_idx}:v", "ph_iscaled"))
             if ph.image_opacity < 1.0:
@@ -615,7 +666,13 @@ def build_compositor_audio_only(
                 )
             else:
                 filters.append("[ph_iscaled]format=rgba[ph_img]")
-        filters.append(f"[{last_v}][ph_img]overlay=0:0[vimg]")
+        if ph.image_max_height > 0 and not placeholder_image_path:
+            ox, oy = _resolve_overlay_pos(
+                ph.image_position, ph.image_x, ph.image_y,
+            )
+        else:
+            ox, oy = "0", "0"
+        filters.append(f"[{last_v}][ph_img]overlay={ox}:{oy}[vimg]")
         last_v = "vimg"
         input_idx += 1
 
@@ -623,8 +680,30 @@ def build_compositor_audio_only(
     if ph.video_path:
         cmd += ["-re", "-stream_loop", "-1", "-i", ph.video_path]
         vid_idx = input_idx
-        filters.append(_scale_pad(v, f"{vid_idx}:v", "ph_vid"))
-        filters.append(f"[{last_v}][ph_vid]overlay=0:0[vvid]")
+        if ph.video_max_height > 0:
+            alpha = (
+                f",colorchannelmixer=aa={ph.video_opacity:.3f}"
+                if ph.video_opacity < 1.0 else ""
+            )
+            filters.append(
+                f"[{vid_idx}:v]scale=-1:{ph.video_max_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"format=rgba{alpha}[ph_vid]"
+            )
+            ox, oy = _resolve_overlay_pos(
+                ph.video_position, ph.video_x, ph.video_y,
+            )
+        else:
+            filters.append(_scale_pad(v, f"{vid_idx}:v", "ph_vscaled"))
+            if ph.video_opacity < 1.0:
+                filters.append(
+                    f"[ph_vscaled]format=rgba,"
+                    f"colorchannelmixer=aa={ph.video_opacity:.3f}[ph_vid]"
+                )
+            else:
+                filters.append("[ph_vscaled]copy[ph_vid]")
+            ox, oy = "0", "0"
+        filters.append(f"[{last_v}][ph_vid]overlay={ox}:{oy}[vvid]")
         last_v = "vvid"
         input_idx += 1
 

@@ -36,11 +36,20 @@ POSITION_PRESETS = (
 class PlaceholderConfig:
     # Base background (always present as the bottom layer)
     background: str = "black"       # "black" | "testcard"
-    # Image layer (overlaid on background, scaled to output resolution)
+    # Image layer (overlaid on background)
     image_path: Optional[str] = None
+    image_position: str = "center"
+    image_x: int = 0
+    image_y: int = 0
     image_opacity: float = 1.0
-    # Video layer (overlaid on image, scaled to output resolution)
+    image_max_height: int = 0       # 0 = full frame (scale+pad); >0 = scale to max px height
+    # Video layer (overlaid on image)
     video_path: Optional[str] = None
+    video_position: str = "center"
+    video_x: int = 0
+    video_y: int = 0
+    video_opacity: float = 1.0
+    video_max_height: int = 0       # 0 = full frame (scale+pad); >0 = scale to max px height
     # Text layer (overlaid on everything)
     text: Optional[str] = None
     font_path: Optional[str] = None
@@ -154,6 +163,18 @@ def _validate(cfg: Config) -> None:
     if not 0.0 <= ph.image_opacity <= 1.0:
         raise ValueError(
             f"placeholder.image_opacity must be 0.0–1.0, got {ph.image_opacity}"
+        )
+    if ph.image_max_height < 0:
+        raise ValueError(
+            f"placeholder.image_max_height must be >= 0, got {ph.image_max_height}"
+        )
+    if not 0.0 <= ph.video_opacity <= 1.0:
+        raise ValueError(
+            f"placeholder.video_opacity must be 0.0–1.0, got {ph.video_opacity}"
+        )
+    if ph.video_max_height < 0:
+        raise ValueError(
+            f"placeholder.video_max_height must be >= 0, got {ph.video_max_height}"
         )
     if not 0.0 <= ph.text_opacity <= 1.0:
         raise ValueError(
@@ -272,7 +293,7 @@ def _migrate_placeholder(p: dict) -> None:
     else:
         p.pop("y", None)
     # Ensure float types
-    for k in ("image_opacity", "text_opacity"):
+    for k in ("image_opacity", "video_opacity", "text_opacity"):
         if k in p:
             p[k] = float(p[k])
 

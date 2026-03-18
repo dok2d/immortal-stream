@@ -265,10 +265,12 @@ class TelegramBot:
             "menu":   self._cb_menu,
             "status": self._cb_status,
             "ph":     self._cb_placeholder,
-            "phimg":  self._cb_ph_image,
-            "phvid":  self._cb_ph_video,
-            "phtxt":  self._cb_ph_text,
-            "phpos":  self._cb_ph_pos,
+            "phimg":    self._cb_ph_image,
+            "phimgpos": self._cb_ph_img_pos,
+            "phvid":    self._cb_ph_video,
+            "phvidpos": self._cb_ph_vid_pos,
+            "phtxt":    self._cb_ph_text,
+            "phpos":    self._cb_ph_pos,
             "ov":       self._cb_overlay,
             "ovimg":    self._cb_ov_image,
             "ovimgpos": self._cb_ov_img_pos,
@@ -458,6 +460,9 @@ class TelegramBot:
                 _kb_ph_image(self.cfg), "Removed",
             )
 
+        if act == "pos":
+            return self._text_ph_img_pos(), _kb_position("phimgpos"), ""
+
         if act == "opacity":
             self._awaiting = "ph:imgopacity"
             await self._send_prompt(
@@ -466,7 +471,36 @@ class TelegramBot:
             )
             return None, None, ""
 
+        if act == "maxh":
+            self._awaiting = "ph:imgmaxh"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.image_max_height or 'full frame'}\n"
+                "Send max height in pixels (0 = full frame):"
+            )
+            return None, None, ""
+
         return self._text_ph_image(), _kb_ph_image(self.cfg), ""
+
+    async def _cb_ph_img_pos(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_img_pos(), _kb_position("phimgpos"), ""
+
+        if act == "custom":
+            self._awaiting = "ph:imgcustompos"
+            await self._send_prompt(
+                "Send coordinates as <code>x,y</code> (pixels):"
+            )
+            return None, None, ""
+
+        if act in POSITION_PRESETS and act != "custom":
+            self.cfg.placeholder.image_position = act
+            await self._reload_compositor()
+            return (
+                self._text_ph_img_pos() + f"\n\n\u2705 {act}",
+                _kb_position("phimgpos"), act,
+            )
 
     # -- Placeholder Video submenu -----------------------------------------
 
@@ -492,7 +526,47 @@ class TelegramBot:
                 _kb_ph_video(self.cfg), "Removed",
             )
 
+        if act == "pos":
+            return self._text_ph_vid_pos(), _kb_position("phvidpos"), ""
+
+        if act == "opacity":
+            self._awaiting = "ph:vidopacity"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.video_opacity:.2f}\n"
+                "Send new value (0.0\u20131.0):"
+            )
+            return None, None, ""
+
+        if act == "maxh":
+            self._awaiting = "ph:vidmaxh"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.video_max_height or 'full frame'}\n"
+                "Send max height in pixels (0 = full frame):"
+            )
+            return None, None, ""
+
         return self._text_ph_video(), _kb_ph_video(self.cfg), ""
+
+    async def _cb_ph_vid_pos(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_vid_pos(), _kb_position("phvidpos"), ""
+
+        if act == "custom":
+            self._awaiting = "ph:vidcustompos"
+            await self._send_prompt(
+                "Send coordinates as <code>x,y</code> (pixels):"
+            )
+            return None, None, ""
+
+        if act in POSITION_PRESETS and act != "custom":
+            self.cfg.placeholder.video_position = act
+            await self._reload_compositor()
+            return (
+                self._text_ph_vid_pos() + f"\n\n\u2705 {act}",
+                _kb_position("phvidpos"), act,
+            )
 
     # -- Placeholder Text submenu ------------------------------------------
 
@@ -896,6 +970,69 @@ class TelegramBot:
             self.cfg.placeholder.image_opacity = v
             await self._reload_compositor()
             return f"\u2705 Image opacity: {v:.2f}", _kb_ph_image(self.cfg)
+
+        if action == "ph:imgmaxh":
+            try:
+                v = int(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be an integer", _kb_ph_image(self.cfg)
+            if v < 0:
+                return "\u274c Must be >= 0 (0 = full frame)", _kb_ph_image(self.cfg)
+            self.cfg.placeholder.image_max_height = v
+            await self._reload_compositor()
+            label = f"{v}px" if v > 0 else "full frame"
+            return f"\u2705 Max height: {label}", _kb_ph_image(self.cfg)
+
+        if action == "ph:imgcustompos":
+            parts = text.replace(" ", "").split(",")
+            if len(parts) != 2:
+                return "\u274c Format: <code>x,y</code>", _kb_position("phimgpos")
+            try:
+                x, y = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                return "\u274c Coordinates must be integers", _kb_position("phimgpos")
+            self.cfg.placeholder.image_position = "custom"
+            self.cfg.placeholder.image_x = x
+            self.cfg.placeholder.image_y = y
+            await self._reload_compositor()
+            return f"\u2705 Position: ({x},{y})", _kb_position("phimgpos")
+
+        if action == "ph:vidopacity":
+            try:
+                v = float(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ph_video(self.cfg)
+            if not 0.0 <= v <= 1.0:
+                return "\u274c Must be 0.0\u20131.0", _kb_ph_video(self.cfg)
+            self.cfg.placeholder.video_opacity = v
+            await self._reload_compositor()
+            return f"\u2705 Video opacity: {v:.2f}", _kb_ph_video(self.cfg)
+
+        if action == "ph:vidmaxh":
+            try:
+                v = int(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be an integer", _kb_ph_video(self.cfg)
+            if v < 0:
+                return "\u274c Must be >= 0 (0 = full frame)", _kb_ph_video(self.cfg)
+            self.cfg.placeholder.video_max_height = v
+            await self._reload_compositor()
+            label = f"{v}px" if v > 0 else "full frame"
+            return f"\u2705 Max height: {label}", _kb_ph_video(self.cfg)
+
+        if action == "ph:vidcustompos":
+            parts = text.replace(" ", "").split(",")
+            if len(parts) != 2:
+                return "\u274c Format: <code>x,y</code>", _kb_position("phvidpos")
+            try:
+                x, y = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                return "\u274c Coordinates must be integers", _kb_position("phvidpos")
+            self.cfg.placeholder.video_position = "custom"
+            self.cfg.placeholder.video_x = x
+            self.cfg.placeholder.video_y = y
+            await self._reload_compositor()
+            return f"\u2705 Position: ({x},{y})", _kb_position("phvidpos")
 
         if action == "ph:fontsize":
             try:
@@ -1587,21 +1724,46 @@ class TelegramBot:
 
     def _text_ph_image(self) -> str:
         ph = self.cfg.placeholder
+        desc = "\U0001f5bc <b>Placeholder Image</b>\n"
         if ph.image_path:
-            desc = f"\U0001f5bc <b>Placeholder Image</b>\n"
             desc += f"File: <code>{os.path.basename(ph.image_path)}</code>\n"
-            desc += f"Opacity: {ph.image_opacity:.2f}"
+            desc += f"Position: {ph.image_position}"
+            if ph.image_position == "custom":
+                desc += f" ({ph.image_x},{ph.image_y})"
+            desc += f"\nOpacity: {ph.image_opacity:.2f}"
+            mh = ph.image_max_height
+            desc += f"\nMax height: {f'{mh}px' if mh > 0 else 'full frame'}"
         else:
-            desc = "\U0001f5bc <b>Placeholder Image</b>\nNo image configured"
+            desc += "No image configured"
+        return desc
+
+    def _text_ph_img_pos(self) -> str:
+        ph = self.cfg.placeholder
+        desc = f"\U0001f4cd <b>Image Position</b>\nCurrent: {ph.image_position}"
+        if ph.image_position == "custom":
+            desc += f" ({ph.image_x},{ph.image_y})"
         return desc
 
     def _text_ph_video(self) -> str:
         ph = self.cfg.placeholder
+        desc = "\U0001f3ac <b>Placeholder Video</b>\n"
         if ph.video_path:
-            desc = f"\U0001f3ac <b>Placeholder Video</b>\n"
-            desc += f"File: <code>{os.path.basename(ph.video_path)}</code>"
+            desc += f"File: <code>{os.path.basename(ph.video_path)}</code>\n"
+            desc += f"Position: {ph.video_position}"
+            if ph.video_position == "custom":
+                desc += f" ({ph.video_x},{ph.video_y})"
+            desc += f"\nOpacity: {ph.video_opacity:.2f}"
+            mh = ph.video_max_height
+            desc += f"\nMax height: {f'{mh}px' if mh > 0 else 'full frame'}"
         else:
-            desc = "\U0001f3ac <b>Placeholder Video</b>\nNo video configured"
+            desc += "No video configured"
+        return desc
+
+    def _text_ph_vid_pos(self) -> str:
+        ph = self.cfg.placeholder
+        desc = f"\U0001f4cd <b>Video Position</b>\nCurrent: {ph.video_position}"
+        if ph.video_position == "custom":
+            desc += f" ({ph.video_x},{ph.video_y})"
         return desc
 
     def _text_ph_text(self) -> str:
@@ -1775,22 +1937,36 @@ def _kb_ph(cfg: Config):
 
 def _kb_ph_image(cfg: Config):
     ph = cfg.placeholder
+    mh = ph.image_max_height
+    mh_label = f"{mh}px" if mh > 0 else "full"
     rows = [
         [
             _btn("\U0001f4f7 Set image", "phimg:set"),
             _btn("\u274c Remove", "phimg:clear"),
         ],
-        [_btn(f"\U0001f4a7 Opacity ({ph.image_opacity:.1f})", "phimg:opacity")],
+        [_btn(f"\U0001f4cd Position ({ph.image_position})", "phimg:pos")],
+        [
+            _btn(f"\U0001f4a7 Opacity ({ph.image_opacity:.1f})", "phimg:opacity"),
+            _btn(f"\U0001f4cf Max H ({mh_label})", "phimg:maxh"),
+        ],
         [_btn("\u25c0\ufe0f Placeholder", "ph:menu")],
     ]
     return rows
 
 
 def _kb_ph_video(cfg: Config):
+    ph = cfg.placeholder
+    mh = ph.video_max_height
+    mh_label = f"{mh}px" if mh > 0 else "full"
     rows = [
         [
             _btn("\U0001f3ac Set video", "phvid:set"),
             _btn("\u274c Remove", "phvid:clear"),
+        ],
+        [_btn(f"\U0001f4cd Position ({ph.video_position})", "phvid:pos")],
+        [
+            _btn(f"\U0001f4a7 Opacity ({ph.video_opacity:.1f})", "phvid:opacity"),
+            _btn(f"\U0001f4cf Max H ({mh_label})", "phvid:maxh"),
         ],
         [_btn("\u25c0\ufe0f Placeholder", "ph:menu")],
     ]
@@ -1824,9 +2000,11 @@ def _kb_ph_text(cfg: Config):
 
 
 _POSITION_BACK = {
-    "phpos":    "phtxt:menu",
-    "ovimgpos": "ovimg:menu",
-    "ovtxtpos": "ovtxt:menu",
+    "phpos":     "phtxt:menu",
+    "phimgpos":  "phimg:menu",
+    "phvidpos":  "phvid:menu",
+    "ovimgpos":  "ovimg:menu",
+    "ovtxtpos":  "ovtxt:menu",
 }
 
 

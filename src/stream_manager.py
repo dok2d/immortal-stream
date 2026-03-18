@@ -531,6 +531,11 @@ class StreamManager:
         if not ph.image_path:
             return None
         v = self.cfg.output.video
+        if ph.image_max_height > 0:
+            return await prepare_image(
+                ph.image_path, max_height=ph.image_max_height,
+                opacity=ph.image_opacity,
+            )
         return await prepare_image(
             ph.image_path, width=v.width, height=v.height,
             opacity=ph.image_opacity,
