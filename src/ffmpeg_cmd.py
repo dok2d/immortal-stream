@@ -542,7 +542,7 @@ def build_output(cfg: Config) -> List[str]:
         raise ValueError("output.targets must not be empty")
 
     cmd = _ffmpeg_base() + [
-        "-fflags", "+genpts",
+        "-fflags", "+genpts+discardcorrupt",
         "-analyzeduration", "10000000",
         "-probesize", "10000000",
         "-f", "mpegts",

@@ -807,6 +807,10 @@ async def _log_stderr(
             "non-existing PPS",
             "decode_slice_header",
             "no frame!",
+            "Packet corrupt",
+            "corrupt input packet",
+            "out of order",
+            "timestamp discontinuity",
         )) or "non monotone" in text.lower():
             continue
         log.log(

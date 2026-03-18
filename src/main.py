@@ -159,12 +159,14 @@ async def main() -> None:
     loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()
 
-    def _signal_handler():
-        log.info("Shutdown signal received")
-        stop_event.set()
+    def _make_signal_handler(sig: signal.Signals):
+        def _handler():
+            log.info("Shutdown signal received: %s (%d)", sig.name, sig.value)
+            stop_event.set()
+        return _handler
 
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _signal_handler)
+        loop.add_signal_handler(sig, _make_signal_handler(sig))
 
     await stop_event.wait()
 

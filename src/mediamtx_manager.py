@@ -159,6 +159,8 @@ class MediamtxManager:
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._config_file: Optional[str] = None
         self._log_task: Optional[asyncio.Task] = None
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._running = False
 
     async def start(self) -> None:
         """Generate config, write to temp file, and start mediamtx."""
@@ -178,6 +180,8 @@ class MediamtxManager:
         )
         self._log_task = asyncio.create_task(self._log_output())
         log.info("mediamtx started (pid=%d)", self._proc.pid)
+        self._running = True
+        self._watchdog_task = asyncio.create_task(self._watchdog())
 
     async def wait_ready(self, timeout: float = 15.0) -> bool:
         """Poll mediamtx API until it responds or the process dies."""
@@ -203,6 +207,14 @@ class MediamtxManager:
 
     async def stop(self) -> None:
         """Terminate mediamtx and clean up the temp config file."""
+        self._running = False
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._watchdog_task = None
         if self._proc and self._proc.returncode is None:
             self._proc.terminate()
             try:
@@ -211,6 +223,31 @@ class MediamtxManager:
                 self._proc.kill()
         if self._config_file and os.path.exists(self._config_file):
             os.unlink(self._config_file)
+
+    async def _restart(self) -> None:
+        """Restart mediamtx using the existing config file."""
+        if not self._config_file or not os.path.exists(self._config_file):
+            log.error("Cannot restart mediamtx: config file missing")
+            return
+        self._proc = await asyncio.create_subprocess_exec(
+            MEDIAMTX_BIN, self._config_file,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        self._log_task = asyncio.create_task(self._log_output())
+        log.info("mediamtx restarted (pid=%d)", self._proc.pid)
+
+    async def _watchdog(self) -> None:
+        """Monitor mediamtx and restart it if it crashes."""
+        while self._running:
+            await asyncio.sleep(5)
+            if (self._proc is not None
+                    and self._proc.returncode is not None):
+                rc = self._proc.returncode
+                log.warning(
+                    "mediamtx exited unexpectedly (code %d) — restarting", rc,
+                )
+                await self._restart()
 
     async def _log_output(self) -> None:
         """Read and log mediamtx stdout/stderr lines."""
