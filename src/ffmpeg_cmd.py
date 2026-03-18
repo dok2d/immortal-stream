@@ -6,6 +6,13 @@ from config import Config, VideoConfig, PlaceholderConfig
 # Default font for drawtext when no font_path is configured.
 DEFAULT_FONT = "/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
 
+# Directory for pre-processed images (overlay, placeholder).
+# Persistent across restarts; controlled by CACHE_DIR env var.
+import os as _os
+_OVERLAY_CACHE_DIR = _os.environ.get(
+    "CACHE_DIR", "/tmp/immortal-stream/cache"
+)
+
 
 # ---------------------------------------------------------------------------
 #  Internal helpers
@@ -195,9 +202,101 @@ def _anullsrc(sample_rate: int) -> List[str]:
     return ["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=stereo"]
 
 
-async def file_has_audio(path: str) -> bool:
-    """Async ffprobe check for an audio stream in a local file."""
+async def prepare_image(
+    src: str,
+    *,
+    width: int = 0,
+    height: int = 0,
+    max_height: int = 0,
+    opacity: float = 1.0,
+) -> str:
+    """Pre-process a static image once, return path to cached result.
+
+    Runs ffmpeg once at compositor start instead of applying filters every
+    frame.  Result is cached in _OVERLAY_CACHE_DIR by (path, mtime, params).
+
+    Modes (mutually exclusive):
+      width + height : scale + pad to exact dimensions (placeholder images)
+      max_height     : scale preserving aspect ratio (overlay images)
+
+    opacity < 1.0 bakes the alpha channel into the image (RGBA PNG output).
+    """
     import asyncio
+    import hashlib
+    import os
+
+    os.makedirs(_OVERLAY_CACHE_DIR, exist_ok=True)
+
+    stat = os.stat(src)
+    key = f"{src}:{stat.st_mtime}:{width}:{height}:{max_height}:{opacity}"
+    h = hashlib.md5(key.encode()).hexdigest()[:12]
+    dst = os.path.join(_OVERLAY_CACHE_DIR, f"img_{h}.png")
+
+    if os.path.isfile(dst):
+        return dst
+
+    # Build the filter chain
+    vf_parts: list[str] = []
+    if width and height:
+        vf_parts.append(
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+        )
+    elif max_height > 0:
+        vf_parts.append(
+            f"scale=-1:{max_height}:force_original_aspect_ratio=decrease"
+        )
+    if opacity < 1.0:
+        vf_parts.append(f"format=rgba,colorchannelmixer=aa={opacity:.3f}")
+
+    vf = ",".join(vf_parts) if vf_parts else "copy"
+
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", src,
+        "-vf", vf,
+        "-frames:v", "1",
+        "-y", dst,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return src
+    if proc.returncode != 0:
+        import logging
+        logging.getLogger("ffmpeg_cmd").warning(
+            "Image prepare failed (code %d): %s", proc.returncode,
+            (stderr or b"").decode(errors="replace")[:200],
+        )
+        return src
+    return dst
+
+
+# Cache for file_has_audio() — keyed by (path, mtime).
+_audio_probe_cache: dict[str, tuple[float, bool]] = {}
+
+
+async def file_has_audio(path: str) -> bool:
+    """Async ffprobe check for an audio stream in a local file.
+
+    Results are cached by (path, mtime) to avoid repeated subprocess
+    calls for the same unchanged file.
+    """
+    import asyncio
+    import os
+
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return False
+
+    cached = _audio_probe_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "quiet", "-select_streams", "a",
@@ -210,7 +309,9 @@ async def file_has_audio(path: str) -> bool:
         except asyncio.TimeoutError:
             proc.kill()
             return False
-        return b"audio" in (stdout or b"")
+        result = b"audio" in (stdout or b"")
+        _audio_probe_cache[path] = (mtime, result)
+        return result
     except Exception:
         return False
 
@@ -242,14 +343,14 @@ def _placeholder_text_filter(
         return None
     escaped = _escape_drawtext(ph.text)
     font = ph.font_path or DEFAULT_FONT
-    x_expr, y_expr = _resolve_drawtext_pos(ph.text_position, ph.x, ph.y)
+    x_expr, y_expr = _resolve_drawtext_pos(ph.text_position, ph.text_x, ph.text_y)
     opts = [
         f"fontfile={font}",
         f"text={escaped}",
         f"x={x_expr}",
         f"y={y_expr}",
         f"fontsize={ph.font_size}",
-        f"fontcolor={ph.font_color}@{ph.opacity:.3f}",
+        f"fontcolor={ph.font_color}@{ph.text_opacity:.3f}",
     ] + _border_opts(ph.font_color)
     return f"[{src_label}]drawtext={':'.join(opts)}[{dst_label}]"
 
@@ -258,15 +359,18 @@ def _placeholder_text_filter(
 #  Compositor: IDLE state
 # ---------------------------------------------------------------------------
 
-def build_compositor_idle(cfg: Config, video_has_audio: bool = False) -> List[str]:
+def build_compositor_idle(
+    cfg: Config,
+    video_has_audio: bool = False,
+    placeholder_image_path: Optional[str] = None,
+) -> List[str]:
     """Compositor command for IDLE state (no incoming stream).
 
-    Outputs placeholder to the internal UDP/MPEG-TS destination.
+    Layers (bottom → top): background → image → video → text.
+    Each layer is independent and optional (except background).
 
-    Text is additive: if placeholder.text is set, it is drawn on top
-    of whatever base type is active (black, testcard, image, video).
-
-    video_has_audio: pre-probed result for placeholder video files.
+    video_has_audio: pre-probed result for placeholder video_path.
+    placeholder_image_path: pre-processed image (scaled+padded+opacity baked).
     """
     v = cfg.output.video
     a = cfg.output.audio
@@ -275,67 +379,106 @@ def build_compositor_idle(cfg: Config, video_has_audio: bool = False) -> List[st
 
     cmd = _ffmpeg_base()
     filters: List[str] = []
-    # Track the current video label through the filter chain
     last_v = "vbase"
-    audio_input_idx = 1   # index of anullsrc input (when used)
+    input_idx = 0
+    audio_from_video = False
 
-    # ── Base type ─────────────────────────────────────────────────────
-    if ph.type == "black":
-        cmd += [
-            "-re", "-f", "lavfi", "-i",
-            f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
-        ]
-        cmd += _anullsrc(a.sample_rate)
-        filters.append("[0:v]copy[vbase]")
-
-    elif ph.type == "testcard":
+    # ── Layer 0: Background (always present) ──────────────────────────
+    if ph.background == "testcard":
         cmd += [
             "-re", "-f", "lavfi", "-i",
             f"testsrc2=s={v.width}x{v.height}:r={v.fps}:sar=1/1",
         ]
-        cmd += _anullsrc(a.sample_rate)
-        filters.append("[0:v]copy[vbase]")
+    else:
+        cmd += [
+            "-re", "-f", "lavfi", "-i",
+            f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
+        ]
+    filters.append("[0:v]copy[vbase]")
+    input_idx = 1
 
-    elif ph.type == "image":
-        cmd += ["-re", "-loop", "1", "-i", ph.path]
-        cmd += _anullsrc(a.sample_rate)
-        filters.append(_scale_pad(v, "0:v", "vscaled"))
-        if ph.opacity < 1.0:
+    # ── Layer 1: Image (optional) ─────────────────────────────────────
+    if ph.image_path:
+        img = placeholder_image_path or ph.image_path
+        cmd += ["-loop", "1", "-i", img]
+        if placeholder_image_path:
+            # Pre-processed (full-frame or max_height + opacity baked)
+            filters.append(f"[{input_idx}:v]format=rgba[ph_img]")
+        elif ph.image_max_height > 0:
+            # Positioned mode: scale to max height
+            alpha = (
+                f",colorchannelmixer=aa={ph.image_opacity:.3f}"
+                if ph.image_opacity < 1.0 else ""
+            )
             filters.append(
-                f"[vscaled]format=rgba,"
-                f"colorchannelmixer=aa={ph.opacity:.3f}[vbase]"
+                f"[{input_idx}:v]scale=-1:{ph.image_max_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"format=rgba{alpha}[ph_img]"
             )
         else:
-            filters.append("[vscaled]copy[vbase]")
+            # Full frame: scale+pad to output resolution
+            filters.append(_scale_pad(v, f"{input_idx}:v", "ph_iscaled"))
+            if ph.image_opacity < 1.0:
+                filters.append(
+                    f"[ph_iscaled]format=rgba,"
+                    f"colorchannelmixer=aa={ph.image_opacity:.3f}[ph_img]"
+                )
+            else:
+                filters.append("[ph_iscaled]format=rgba[ph_img]")
+        if ph.image_max_height > 0 and not placeholder_image_path:
+            ox, oy = _resolve_overlay_pos(
+                ph.image_position, ph.image_x, ph.image_y,
+            )
+        else:
+            ox, oy = "0", "0"
+        filters.append(f"[{last_v}][ph_img]overlay={ox}:{oy}[vimg]")
+        last_v = "vimg"
+        input_idx += 1
 
-    elif ph.type == "video":
-        cmd += ["-re", "-stream_loop", "-1", "-i", ph.path]
-        filters.append(_scale_pad(v, "0:v", "vbase"))
-
+    # ── Layer 2: Video (optional) ─────────────────────────────────────
+    if ph.video_path:
+        cmd += ["-re", "-stream_loop", "-1", "-i", ph.video_path]
+        vid_idx = input_idx
+        if ph.video_max_height > 0:
+            alpha = (
+                f",colorchannelmixer=aa={ph.video_opacity:.3f}"
+                if ph.video_opacity < 1.0 else ""
+            )
+            filters.append(
+                f"[{vid_idx}:v]scale=-1:{ph.video_max_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"format=rgba{alpha}[ph_vid]"
+            )
+            ox, oy = _resolve_overlay_pos(
+                ph.video_position, ph.video_x, ph.video_y,
+            )
+        else:
+            filters.append(_scale_pad(v, f"{vid_idx}:v", "ph_vscaled"))
+            if ph.video_opacity < 1.0:
+                filters.append(
+                    f"[ph_vscaled]format=rgba,"
+                    f"colorchannelmixer=aa={ph.video_opacity:.3f}[ph_vid]"
+                )
+            else:
+                filters.append("[ph_vscaled]copy[ph_vid]")
+            ox, oy = "0", "0"
+        filters.append(f"[{last_v}][ph_vid]overlay={ox}:{oy}[vvid]")
+        last_v = "vvid"
         if video_has_audio:
             filters.append(
-                f"[0:a]aresample={a.sample_rate},"
+                f"[{vid_idx}:a]aresample={a.sample_rate},"
                 f"aformat=channel_layouts=stereo[aout]"
             )
-            # Add text overlay if configured
-            text_f = _placeholder_text_filter(ph, last_v, "vout")
-            if text_f:
-                filters.append(text_f)
-            else:
-                filters.append(f"[{last_v}]copy[vout]")
-            cmd += ["-filter_complex", ";".join(filters)]
-            cmd += ["-map", "[vout]", "-map", "[aout]"]
-            cmd += _encoding_flags(cfg)
-            cmd += ["-f", "mpegts", dest]
-            return cmd
-        else:
-            cmd += _anullsrc(a.sample_rate)
-            audio_input_idx = 1
+            audio_from_video = True
+        input_idx += 1
 
-    else:
-        raise ValueError(f"Unknown placeholder.type: {ph.type!r}")
+    # ── Silence source (if no video audio) ────────────────────────────
+    if not audio_from_video:
+        cmd += _anullsrc(a.sample_rate)
+        silence_idx = input_idx
+        input_idx += 1
 
-    # ── Additive text overlay on base ─────────────────────────────────
+    # ── Layer 3: Text (optional) ──────────────────────────────────────
     text_f = _placeholder_text_filter(ph, last_v, "vout")
     if text_f:
         filters.append(text_f)
@@ -343,7 +486,11 @@ def build_compositor_idle(cfg: Config, video_has_audio: bool = False) -> List[st
         filters.append(f"[{last_v}]copy[vout]")
 
     cmd += ["-filter_complex", ";".join(filters)]
-    cmd += ["-map", "[vout]", "-map", f"{audio_input_idx}:a"]
+    cmd += ["-map", "[vout]"]
+    if audio_from_video:
+        cmd += ["-map", "[aout]"]
+    else:
+        cmd += ["-map", f"{silence_idx}:a"]
     cmd += _encoding_flags(cfg)
     cmd += ["-f", "mpegts", dest]
     return cmd
@@ -357,11 +504,15 @@ def build_compositor_live(
     cfg: Config,
     stream_path: str,
     has_audio: bool,
+    overlay_image_path: Optional[str] = None,
 ) -> List[str]:
     """Compositor command for LIVE state.
 
     Reads incoming stream from mediamtx (RTSP), applies optional overlay,
     and outputs to the internal UDP/MPEG-TS destination.
+
+    overlay_image_path: pre-processed overlay image (resized + opacity baked).
+        When provided, no runtime scale/opacity filters are applied.
     """
     v = cfg.output.video
     a = cfg.output.audio
@@ -379,33 +530,48 @@ def build_compositor_live(
     # Scale/pad incoming to output resolution
     filters.append(_scale_pad(v, "0:v", "vscaled"))
 
-    # Overlay (only in LIVE mode)
+    # Overlay layers (only in LIVE mode) — image and text are independent
     if ov.enabled:
-        if ov.type == "image" and ov.path:
-            cmd += ["-loop", "1", "-i", ov.path]
-            alpha = (
-                f",colorchannelmixer=aa={ov.opacity:.3f}"
-                if ov.opacity < 1.0 else ""
+        # Layer 1: image overlay (pre-processed: resized + opacity baked)
+        img_path = overlay_image_path or ov.path
+        if img_path:
+            cmd += ["-loop", "1", "-i", img_path]
+            if overlay_image_path:
+                # Already resized + opacity baked — just pass through
+                filters.append(
+                    f"[{input_idx}:v]format=rgba[ov_img]"
+                )
+            else:
+                alpha = (
+                    f",colorchannelmixer=aa={ov.image_opacity:.3f}"
+                    if ov.image_opacity < 1.0 else ""
+                )
+                filters.append(
+                    f"[{input_idx}:v]format=rgba{alpha}[ov_img]"
+                )
+            ox, oy = _resolve_overlay_pos(
+                ov.image_position, ov.image_x, ov.image_y,
             )
-            filters.append(f"[{input_idx}:v]format=rgba{alpha}[ov_img]")
-            ox, oy = _resolve_overlay_pos(ov.position, ov.x, ov.y)
             filters.append(
                 f"[{last_v}][ov_img]overlay={ox}:{oy}[vwith_ov]"
             )
             last_v = "vwith_ov"
             input_idx += 1
 
-        elif ov.type == "text" and ov.text:
+        # Layer 2: text overlay (drawn on top of image overlay)
+        if ov.text:
             escaped = _escape_drawtext(ov.text)
             font = ov.font_path or DEFAULT_FONT
-            tx, ty = _resolve_drawtext_pos(ov.position, ov.x, ov.y)
+            tx, ty = _resolve_drawtext_pos(
+                ov.text_position, ov.text_x, ov.text_y,
+            )
             opts = [
                 f"fontfile={font}",
                 f"text={escaped}",
                 f"x={tx}",
                 f"y={ty}",
                 f"fontsize={ov.font_size}",
-                f"fontcolor={ov.font_color}@{ov.opacity:.3f}",
+                f"fontcolor={ov.font_color}@{ov.text_opacity:.3f}",
             ] + _border_opts(ov.font_color)
             filters.append(
                 f"[{last_v}]drawtext={':'.join(opts)}[vwith_text]"
@@ -442,13 +608,13 @@ def build_compositor_audio_only(
     cfg: Config,
     stream_path: str,
     video_has_audio: bool = False,
+    placeholder_image_path: Optional[str] = None,
 ) -> List[str]:
-    """Compositor for audio-only input — keeps placeholder video,
-    replaces placeholder audio with the incoming stream's audio.
+    """Compositor for audio-only input — keeps placeholder video layers,
+    replaces audio with the incoming stream's audio.
 
-    When the incoming stream has audio but no video (e.g. audio-only
-    source from OBS), the placeholder image/video stays on screen
-    and only the audio track is replaced.
+    Layers (bottom → top): background → image → video → text.
+    Audio comes from the incoming stream (not from placeholder video).
     """
     v = cfg.output.video
     a = cfg.output.audio
@@ -459,54 +625,99 @@ def build_compositor_audio_only(
     cmd = _ffmpeg_base()
     filters: List[str] = []
     last_v = "vbase"
+    input_idx = 0
 
-    # ── Placeholder video (same as idle mode) ──────────────────────────
-    if ph.type == "black":
-        cmd += [
-            "-re", "-f", "lavfi", "-i",
-            f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
-        ]
-        filters.append("[0:v]copy[vbase]")
-
-    elif ph.type == "testcard":
+    # ── Layer 0: Background ───────────────────────────────────────────
+    if ph.background == "testcard":
         cmd += [
             "-re", "-f", "lavfi", "-i",
             f"testsrc2=s={v.width}x{v.height}:r={v.fps}:sar=1/1",
         ]
-        filters.append("[0:v]copy[vbase]")
+    else:
+        cmd += [
+            "-re", "-f", "lavfi", "-i",
+            f"color=c=black:s={v.width}x{v.height}:r={v.fps}:sar=1/1",
+        ]
+    filters.append("[0:v]copy[vbase]")
+    input_idx = 1
 
-    elif ph.type == "image":
-        cmd += ["-re", "-loop", "1", "-i", ph.path]
-        filters.append(_scale_pad(v, "0:v", "vscaled"))
-        if ph.opacity < 1.0:
+    # ── Layer 1: Image ────────────────────────────────────────────────
+    if ph.image_path:
+        img = placeholder_image_path or ph.image_path
+        cmd += ["-loop", "1", "-i", img]
+        if placeholder_image_path:
+            filters.append(f"[{input_idx}:v]format=rgba[ph_img]")
+        elif ph.image_max_height > 0:
+            alpha = (
+                f",colorchannelmixer=aa={ph.image_opacity:.3f}"
+                if ph.image_opacity < 1.0 else ""
+            )
             filters.append(
-                f"[vscaled]format=rgba,"
-                f"colorchannelmixer=aa={ph.opacity:.3f}[vbase]"
+                f"[{input_idx}:v]scale=-1:{ph.image_max_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"format=rgba{alpha}[ph_img]"
             )
         else:
-            filters.append("[vscaled]copy[vbase]")
+            filters.append(_scale_pad(v, f"{input_idx}:v", "ph_iscaled"))
+            if ph.image_opacity < 1.0:
+                filters.append(
+                    f"[ph_iscaled]format=rgba,"
+                    f"colorchannelmixer=aa={ph.image_opacity:.3f}[ph_img]"
+                )
+            else:
+                filters.append("[ph_iscaled]format=rgba[ph_img]")
+        if ph.image_max_height > 0 and not placeholder_image_path:
+            ox, oy = _resolve_overlay_pos(
+                ph.image_position, ph.image_x, ph.image_y,
+            )
+        else:
+            ox, oy = "0", "0"
+        filters.append(f"[{last_v}][ph_img]overlay={ox}:{oy}[vimg]")
+        last_v = "vimg"
+        input_idx += 1
 
-    elif ph.type == "video":
-        cmd += ["-re", "-stream_loop", "-1", "-i", ph.path]
-        filters.append(_scale_pad(v, "0:v", "vbase"))
+    # ── Layer 2: Video ────────────────────────────────────────────────
+    if ph.video_path:
+        cmd += ["-re", "-stream_loop", "-1", "-i", ph.video_path]
+        vid_idx = input_idx
+        if ph.video_max_height > 0:
+            alpha = (
+                f",colorchannelmixer=aa={ph.video_opacity:.3f}"
+                if ph.video_opacity < 1.0 else ""
+            )
+            filters.append(
+                f"[{vid_idx}:v]scale=-1:{ph.video_max_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"format=rgba{alpha}[ph_vid]"
+            )
+            ox, oy = _resolve_overlay_pos(
+                ph.video_position, ph.video_x, ph.video_y,
+            )
+        else:
+            filters.append(_scale_pad(v, f"{vid_idx}:v", "ph_vscaled"))
+            if ph.video_opacity < 1.0:
+                filters.append(
+                    f"[ph_vscaled]format=rgba,"
+                    f"colorchannelmixer=aa={ph.video_opacity:.3f}[ph_vid]"
+                )
+            else:
+                filters.append("[ph_vscaled]copy[ph_vid]")
+            ox, oy = "0", "0"
+        filters.append(f"[{last_v}][ph_vid]overlay={ox}:{oy}[vvid]")
+        last_v = "vvid"
+        input_idx += 1
 
-    else:
-        raise ValueError(f"Unknown placeholder.type: {ph.type!r}")
-
-    # ── Placeholder text overlay (additive) ────────────────────────────
+    # ── Layer 3: Text ─────────────────────────────────────────────────
     text_f = _placeholder_text_filter(ph, last_v, "vout")
     if text_f:
         filters.append(text_f)
     else:
         filters.append(f"[{last_v}]copy[vout]")
 
-    # ── Audio from the incoming stream ─────────────────────────────────
-    stream_input_idx = len(cmd[cmd.index("-i") - 1:]) // 2  # rough
-    # Simpler: count how many -i flags we have so far
-    input_count = sum(1 for x in cmd if x == "-i")
+    # ── Audio from the incoming stream ────────────────────────────────
     cmd += ["-rtsp_transport", "tcp", "-i", stream_url]
     filters.append(
-        f"[{input_count}:a]aresample={a.sample_rate},"
+        f"[{input_idx}:a]aresample={a.sample_rate},"
         f"aformat=channel_layouts=stereo[aout]"
     )
 
@@ -542,7 +753,7 @@ def build_output(cfg: Config) -> List[str]:
         raise ValueError("output.targets must not be empty")
 
     cmd = _ffmpeg_base() + [
-        "-fflags", "+genpts",
+        "-fflags", "+genpts+discardcorrupt",
         "-analyzeduration", "10000000",
         "-probesize", "10000000",
         "-f", "mpegts",

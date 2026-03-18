@@ -36,7 +36,7 @@ from typing import Optional, Dict, List
 from config import Config
 from ffmpeg_cmd import (
     build_compositor_idle, build_compositor_live, build_compositor_audio_only,
-    build_output, file_has_audio,
+    build_output, file_has_audio, prepare_image,
 )
 
 log = logging.getLogger("stream_manager")
@@ -525,15 +525,46 @@ class StreamManager:
     #  Compositor management                                               #
     # ------------------------------------------------------------------ #
 
+    async def _prepare_placeholder_image(self) -> Optional[str]:
+        """Pre-process placeholder image (scale+pad+opacity) if applicable."""
+        ph = self.cfg.placeholder
+        if not ph.image_path:
+            return None
+        v = self.cfg.output.video
+        if ph.image_max_height > 0:
+            return await prepare_image(
+                ph.image_path, max_height=ph.image_max_height,
+                opacity=ph.image_opacity,
+            )
+        return await prepare_image(
+            ph.image_path, width=v.width, height=v.height,
+            opacity=ph.image_opacity,
+        )
+
+    async def _prepare_overlay_image(self) -> Optional[str]:
+        """Pre-process overlay image (resize+opacity) if applicable."""
+        ov = self.cfg.overlay
+        if not ov.enabled or not ov.path:
+            return None
+        return await prepare_image(
+            ov.path,
+            max_height=ov.image_max_height if ov.image_max_height > 0 else 0,
+            opacity=ov.image_opacity,
+        )
+
     async def _start_compositor_idle(self) -> None:
         try:
             ph = self.cfg.placeholder
             has_audio = (
-                await file_has_audio(ph.path)
-                if ph.type == "video" and ph.path
+                await file_has_audio(ph.video_path)
+                if ph.video_path
                 else False
             )
-            cmd = build_compositor_idle(self.cfg, video_has_audio=has_audio)
+            ph_img = await self._prepare_placeholder_image()
+            cmd = build_compositor_idle(
+                self.cfg, video_has_audio=has_audio,
+                placeholder_image_path=ph_img,
+            )
         except Exception as e:
             log.error("Failed to build idle compositor command: %s", e)
             self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
@@ -542,7 +573,11 @@ class StreamManager:
 
     async def _start_compositor_live(self, info: StreamInfo) -> None:
         try:
-            cmd = build_compositor_live(self.cfg, info.path, info.has_audio)
+            overlay_img = await self._prepare_overlay_image()
+            cmd = build_compositor_live(
+                self.cfg, info.path, info.has_audio,
+                overlay_image_path=overlay_img,
+            )
         except Exception as e:
             log.error("Failed to build live compositor command: %s", e)
             self.notifier.send(f"\u26a0\ufe0f Compositor build error: {e}")
@@ -550,16 +585,18 @@ class StreamManager:
         await self._replace_compositor(cmd, f"LIVE({info.path})")
 
     async def _start_compositor_audio_only(self, info: StreamInfo) -> None:
-        """Audio-only mode: placeholder video + incoming audio."""
+        """Audio-only mode: placeholder video layers + incoming audio."""
         try:
             ph = self.cfg.placeholder
             ph_has_audio = (
-                await file_has_audio(ph.path)
-                if ph.type == "video" and ph.path
+                await file_has_audio(ph.video_path)
+                if ph.video_path
                 else False
             )
+            ph_img = await self._prepare_placeholder_image()
             cmd = build_compositor_audio_only(
                 self.cfg, info.path, video_has_audio=ph_has_audio,
+                placeholder_image_path=ph_img,
             )
         except Exception as e:
             log.error("Failed to build audio-only compositor: %s", e)
@@ -806,7 +843,13 @@ async def _log_stderr(
             "Last message repeated",
             "non-existing PPS",
             "decode_slice_header",
+            "co located POCs",
+            "mmco:",
             "no frame!",
+            "Packet corrupt",
+            "corrupt input packet",
+            "out of order",
+            "timestamp discontinuity",
         )) or "non monotone" in text.lower():
             continue
         log.log(

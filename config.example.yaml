@@ -66,30 +66,31 @@ ingest:
 
 # ── Placeholder layer ──────────────────────────────────────────────────────────
 # Shown to the target service whenever no incoming stream is active.
+# Independent layers (bottom → top): background → image → video → text.
+# Each layer is optional and has its own settings.
 placeholder:
-  # Type: black | image | video | testcard
-  # "testcard" is the default — colour bars test pattern.
-  # "black" requires no files — good for testing out of the box.
-  type: testcard
+  # Background: "black" or "testcard" (always present).
+  background: black
 
-  # ── Text overlay on placeholder ──────────────────────────────────
-  # Text is additive — it appears on top of any base type.
+  # ── Image layer (overlaid on background) ─────────────────────────
+  # Set via Telegram bot or /placeholder image <path>
+  # image_path: /media/placeholder.jpg
+  # image_opacity: 1.0                        # 0.0 (transparent) … 1.0 (opaque)
+
+  # ── Video layer (overlaid on image) ──────────────────────────────
+  # Loops indefinitely. Audio from this video is used if available.
+  # video_path: /media/placeholder.mp4
+
+  # ── Text layer (overlaid on everything) ──────────────────────────
   # Set via Telegram bot or /placeholder text <text>
   # text: "Трансляция скоро начнётся"
   # font_path: /media/fonts/MyFont.ttf        # TTF/OTF font; JetBrains Mono used if omitted
   # font_size: 72
   # font_color: white                         # FFmpeg color name or #RRGGBB
-
-  # Path to the placeholder file (image: JPEG/PNG, video: any FFmpeg-readable).
-  # Required only when type is image or video.
-  # path: /media/placeholder.jpg
-
-  # Position (pixels from top-left). For text: 0,0 = centered.
-  x: 0
-  y: 0
-
-  # Opacity 0.0 (transparent) … 1.0 (opaque).
-  opacity: 1.0
+  # text_position: center                     # preset name or "custom"
+  # text_x: 0                                 # used when text_position=custom
+  # text_y: 0
+  # text_opacity: 1.0                         # 0.0 … 1.0
 
 
 # ── Supplementary overlay layer ────────────────────────────────────────────────

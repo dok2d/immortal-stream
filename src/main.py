@@ -13,7 +13,7 @@ import signal
 import socket
 import sys
 
-from config import load_config
+from config import load_config, load_state
 from mediamtx_manager import MediamtxManager
 from stream_manager import StreamManager
 from telegram import TelegramNotifier, NoopNotifier
@@ -27,6 +27,7 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/etc/immortal-stream/config.yaml")
+STATE_PATH = os.environ.get("STATE_PATH", "")  # default: alongside config
 
 
 def _is_telegram_configured(cfg) -> bool:
@@ -88,6 +89,11 @@ async def main() -> None:
         log.critical("Failed to load config from %s: %s", CONFIG_PATH, e)
         sys.exit(1)
 
+    # -- Restore saved runtime state (bot settings) -------------------------
+    state_path = STATE_PATH or "/tmp/immortal-stream/state.yaml"
+    if load_state(cfg, state_path):
+        log.info("Restored runtime state from %s", state_path)
+
     level = getattr(logging, cfg.log_level, logging.INFO)
     logging.getLogger().setLevel(level)
 
@@ -103,7 +109,7 @@ async def main() -> None:
         cfg.ingest.port,
         cfg.ingest.srt_port,
         len(cfg.output.targets),
-        cfg.placeholder.type,
+        cfg.placeholder.background,
     )
 
     # -- Telegram notifier -------------------------------------------------
@@ -134,7 +140,7 @@ async def main() -> None:
     # -- Telegram bot (runtime config changes) -----------------------------
     bot = None
     if _is_telegram_configured(cfg):
-        bot = TelegramBot(cfg, manager)
+        bot = TelegramBot(cfg, manager, state_path=state_path)
         bot.start()
 
     # -- Startup notification ----------------------------------------------
@@ -150,7 +156,10 @@ async def main() -> None:
         f"Ingest RTMP: :{cfg.ingest.port}\n"
         f"Ingest SRT:  :{cfg.ingest.srt_port}"
         f"{hls_line}{key_line}\n"
-        f"Placeholder: {cfg.placeholder.type}\n"
+        f"Placeholder: bg={cfg.placeholder.background}"
+        f"{' +img' if cfg.placeholder.image_path else ''}"
+        f"{' +vid' if cfg.placeholder.video_path else ''}"
+        f"{' +txt' if cfg.placeholder.text else ''}\n"
         f"Overlay: {'enabled' if cfg.overlay.enabled else 'disabled'}\n"
         f"Targets:\n{target_list}"
     )
@@ -159,12 +168,14 @@ async def main() -> None:
     loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()
 
-    def _signal_handler():
-        log.info("Shutdown signal received")
-        stop_event.set()
+    def _make_signal_handler(sig: signal.Signals):
+        def _handler():
+            log.info("Shutdown signal received: %s (%d)", sig.name, sig.value)
+            stop_event.set()
+        return _handler
 
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _signal_handler)
+        loop.add_signal_handler(sig, _make_signal_handler(sig))
 
     await stop_event.wait()
 

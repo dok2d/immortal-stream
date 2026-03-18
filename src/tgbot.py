@@ -21,7 +21,7 @@ import re
 import urllib.request
 from typing import Callable, Optional, TYPE_CHECKING
 
-from config import Config, _X264_PRESETS, POSITION_PRESETS
+from config import Config, _X264_PRESETS, POSITION_PRESETS, save_state
 
 if TYPE_CHECKING:
     from stream_manager import StreamManager
@@ -41,9 +41,15 @@ _MAX_VIDEO = 50 * 1024 * 1024      # 50 MB (bot API file limit)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TelegramBot:
-    def __init__(self, cfg: Config, manager: "StreamManager"):
+    def __init__(
+        self,
+        cfg: Config,
+        manager: "StreamManager",
+        state_path: str = "",
+    ):
         self.cfg = cfg
         self.manager = manager
+        self._state_path = state_path
         self._base = f"https://api.telegram.org/bot{cfg.telegram.bot_token}"
         self._chat_id = cfg.telegram.chat_id
         self._running = False
@@ -73,6 +79,29 @@ class TelegramBot:
         exc = task.exception()
         if exc:
             log.error("Bot poll loop crashed: %s", exc)
+
+    # ------------------------------------------------------------------ #
+    #  State persistence helpers                                           #
+    # ------------------------------------------------------------------ #
+
+    def _save_state(self) -> None:
+        """Persist current config to state file (if configured)."""
+        if self._state_path:
+            save_state(self.cfg, self._state_path)
+
+    async def _save_state_async(self) -> None:
+        """Async wrapper for _save_state (used as reload_fn callback)."""
+        self._save_state()
+
+    async def _reload_compositor(self) -> None:
+        """Reload compositor and persist state."""
+        await self.manager.reload_compositor()
+        self._save_state()
+
+    async def _reload_output(self) -> None:
+        """Reload output FFmpeg and persist state."""
+        await self.manager.reload_output()
+        self._save_state()
 
     # ------------------------------------------------------------------ #
     #  Telegram API helpers                                                #
@@ -236,11 +265,17 @@ class TelegramBot:
             "menu":   self._cb_menu,
             "status": self._cb_status,
             "ph":     self._cb_placeholder,
-            "phtxt":  self._cb_ph_text,
-            "phpos":  self._cb_ph_pos,
-            "ov":     self._cb_overlay,
-            "ovtxt":  self._cb_ov_text,
-            "ovpos":  self._cb_ov_pos,
+            "phimg":    self._cb_ph_image,
+            "phimgpos": self._cb_ph_img_pos,
+            "phvid":    self._cb_ph_video,
+            "phvidpos": self._cb_ph_vid_pos,
+            "phtxt":    self._cb_ph_text,
+            "phpos":    self._cb_ph_pos,
+            "ov":       self._cb_overlay,
+            "ovimg":    self._cb_ov_image,
+            "ovimgpos": self._cb_ov_img_pos,
+            "ovtxt":    self._cb_ov_text,
+            "ovtxtpos": self._cb_ov_txt_pos,
             "target": self._cb_target,
             "out":    self._cb_output,
             "power":  self._cb_power,
@@ -385,31 +420,97 @@ class TelegramBot:
             return self._text_ph(), _kb_ph(self.cfg), ""
 
         if act == "black":
-            self.cfg.placeholder.type = "black"
-            self.cfg.placeholder.path = None
-            await self.manager.reload_compositor()
+            self.cfg.placeholder.background = "black"
+            await self._reload_compositor()
             return (
-                self._text_ph() + "\n\n\u2705 Black screen",
+                self._text_ph() + "\n\n\u2705 Background: black",
                 _kb_ph(self.cfg), "Black",
             )
 
         if act == "testcard":
-            self.cfg.placeholder.type = "testcard"
-            self.cfg.placeholder.path = None
-            await self.manager.reload_compositor()
+            self.cfg.placeholder.background = "testcard"
+            await self._reload_compositor()
             return (
-                self._text_ph() + "\n\n\u2705 Test card",
+                self._text_ph() + "\n\n\u2705 Background: testcard",
                 _kb_ph(self.cfg), "Testcard",
             )
 
-        if act == "image":
+        return self._text_ph(), _kb_ph(self.cfg), ""
+
+    # -- Placeholder Image submenu -----------------------------------------
+
+    async def _cb_ph_image(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_image(), _kb_ph_image(self.cfg), ""
+
+        if act == "set":
             self._awaiting = "ph:image"
             await self._send_prompt(
                 "\U0001f4f7 Send a photo, or a file path on the server:"
             )
             return None, None, ""
 
-        if act == "video":
+        if act == "clear":
+            self.cfg.placeholder.image_path = None
+            await self._reload_compositor()
+            return (
+                self._text_ph_image() + "\n\n\u2705 Image removed",
+                _kb_ph_image(self.cfg), "Removed",
+            )
+
+        if act == "pos":
+            return self._text_ph_img_pos(), _kb_position("phimgpos"), ""
+
+        if act == "opacity":
+            self._awaiting = "ph:imgopacity"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.image_opacity:.2f}\n"
+                "Send new value (0.0\u20131.0):"
+            )
+            return None, None, ""
+
+        if act == "maxh":
+            self._awaiting = "ph:imgmaxh"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.image_max_height or 'full frame'}\n"
+                "Send max height in pixels (0 = full frame):"
+            )
+            return None, None, ""
+
+        return self._text_ph_image(), _kb_ph_image(self.cfg), ""
+
+    async def _cb_ph_img_pos(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_img_pos(), _kb_position("phimgpos"), ""
+
+        if act == "custom":
+            self._awaiting = "ph:imgcustompos"
+            await self._send_prompt(
+                "Send coordinates as <code>x,y</code> (pixels):"
+            )
+            return None, None, ""
+
+        if act in POSITION_PRESETS and act != "custom":
+            self.cfg.placeholder.image_position = act
+            await self._reload_compositor()
+            return (
+                self._text_ph_img_pos() + f"\n\n\u2705 {act}",
+                _kb_position("phimgpos"), act,
+            )
+
+    # -- Placeholder Video submenu -----------------------------------------
+
+    async def _cb_ph_video(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_video(), _kb_ph_video(self.cfg), ""
+
+        if act == "set":
             self._awaiting = "ph:video"
             await self._send_prompt(
                 "\U0001f3ac Send a video file, or a file path on the server:\n"
@@ -417,15 +518,55 @@ class TelegramBot:
             )
             return None, None, ""
 
+        if act == "clear":
+            self.cfg.placeholder.video_path = None
+            await self._reload_compositor()
+            return (
+                self._text_ph_video() + "\n\n\u2705 Video removed",
+                _kb_ph_video(self.cfg), "Removed",
+            )
+
+        if act == "pos":
+            return self._text_ph_vid_pos(), _kb_position("phvidpos"), ""
+
         if act == "opacity":
-            self._awaiting = "ph:opacity"
+            self._awaiting = "ph:vidopacity"
             await self._send_prompt(
-                f"Current: {self.cfg.placeholder.opacity:.2f}\n"
+                f"Current: {self.cfg.placeholder.video_opacity:.2f}\n"
                 "Send new value (0.0\u20131.0):"
             )
             return None, None, ""
 
-        return self._text_ph(), _kb_ph(self.cfg), ""
+        if act == "maxh":
+            self._awaiting = "ph:vidmaxh"
+            await self._send_prompt(
+                f"Current: {self.cfg.placeholder.video_max_height or 'full frame'}\n"
+                "Send max height in pixels (0 = full frame):"
+            )
+            return None, None, ""
+
+        return self._text_ph_video(), _kb_ph_video(self.cfg), ""
+
+    async def _cb_ph_vid_pos(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ph_vid_pos(), _kb_position("phvidpos"), ""
+
+        if act == "custom":
+            self._awaiting = "ph:vidcustompos"
+            await self._send_prompt(
+                "Send coordinates as <code>x,y</code> (pixels):"
+            )
+            return None, None, ""
+
+        if act in POSITION_PRESETS and act != "custom":
+            self.cfg.placeholder.video_position = act
+            await self._reload_compositor()
+            return (
+                self._text_ph_vid_pos() + f"\n\n\u2705 {act}",
+                _kb_position("phvidpos"), act,
+            )
 
     # -- Placeholder Text submenu ------------------------------------------
 
@@ -447,7 +588,7 @@ class TelegramBot:
 
         if act == "off":
             self.cfg.placeholder.text = None
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return (
                 self._text_ph_text() + "\n\n\u2705 Text removed",
                 _kb_ph_text(self.cfg), "Removed",
@@ -475,7 +616,7 @@ class TelegramBot:
         if act == "opacity":
             self._awaiting = "ph:textopacity"
             await self._send_prompt(
-                f"Current: {self.cfg.placeholder.opacity:.2f}\n"
+                f"Current: {self.cfg.placeholder.text_opacity:.2f}\n"
                 "Send text opacity (0.0\u20131.0):"
             )
             return None, None, ""
@@ -506,7 +647,7 @@ class TelegramBot:
         # Position preset
         if act in POSITION_PRESETS and act != "custom":
             self.cfg.placeholder.text_position = act
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return (
                 self._text_ph_pos() + f"\n\n\u2705 {act}",
                 _kb_position("phpos"), act,
@@ -522,15 +663,25 @@ class TelegramBot:
 
         if act == "off":
             self.cfg.overlay.enabled = False
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return self._text_ov() + "\n\n\u2705 Disabled", _kb_ov(self.cfg), "Off"
 
         if act == "on":
             self.cfg.overlay.enabled = True
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return self._text_ov() + "\n\n\u2705 Enabled", _kb_ov(self.cfg), "On"
 
-        if act == "image":
+        return self._text_ov(), _kb_ov(self.cfg), ""
+
+    # -- Overlay Image submenu -----------------------------------------------
+
+    async def _cb_ov_image(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ov_image(), _kb_ov_image(self.cfg), ""
+
+        if act == "set":
             self._awaiting = "ov:image"
             await self._send_prompt(
                 "\U0001f4f7 Send a photo (PNG recommended), "
@@ -538,15 +689,61 @@ class TelegramBot:
             )
             return None, None, ""
 
+        if act == "clear":
+            self.cfg.overlay.path = None
+            if self.cfg.overlay.enabled:
+                await self._reload_compositor()
+            else:
+                self._save_state()
+            return (
+                self._text_ov_image() + "\n\n\u2705 Image cleared",
+                _kb_ov_image(self.cfg), "Cleared",
+            )
+
+        if act == "pos":
+            return self._text_ov_img_pos(), _kb_position("ovimgpos"), ""
+
         if act == "opacity":
-            self._awaiting = "ov:opacity"
+            self._awaiting = "ov:imgopacity"
             await self._send_prompt(
-                f"Current: {self.cfg.overlay.opacity:.2f}\n"
+                f"Current: {self.cfg.overlay.image_opacity:.2f}\n"
                 "Send value (0.0\u20131.0):"
             )
             return None, None, ""
 
-        return self._text_ov(), _kb_ov(self.cfg), ""
+        if act == "maxh":
+            self._awaiting = "ov:imgmaxh"
+            await self._send_prompt(
+                f"Current: {self.cfg.overlay.image_max_height or 'original'}\n"
+                "Send max height in pixels (0 = original size):"
+            )
+            return None, None, ""
+
+        return self._text_ov_image(), _kb_ov_image(self.cfg), ""
+
+    async def _cb_ov_img_pos(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_ov_img_pos(), _kb_position("ovimgpos"), ""
+
+        if act == "custom":
+            self._awaiting = "ov:imgcustompos"
+            await self._send_prompt(
+                "Send coordinates as <code>x,y</code> (pixels):"
+            )
+            return None, None, ""
+
+        if act in POSITION_PRESETS and act != "custom":
+            self.cfg.overlay.image_position = act
+            if self.cfg.overlay.enabled:
+                await self._reload_compositor()
+            else:
+                self._save_state()
+            return (
+                self._text_ov_img_pos() + f"\n\n\u2705 {act}",
+                _kb_position("ovimgpos"), act,
+            )
 
     # -- Overlay Text submenu -----------------------------------------------
 
@@ -560,6 +757,17 @@ class TelegramBot:
             self._awaiting = "ov:text"
             await self._send_prompt("\u270f\ufe0f Send overlay text:")
             return None, None, ""
+
+        if act == "clear":
+            self.cfg.overlay.text = None
+            if self.cfg.overlay.enabled:
+                await self._reload_compositor()
+            else:
+                self._save_state()
+            return (
+                self._text_ov_text() + "\n\n\u2705 Text cleared",
+                _kb_ov_text(self.cfg), "Cleared",
+            )
 
         if act == "size":
             self._awaiting = "ov:size"
@@ -578,12 +786,12 @@ class TelegramBot:
             return None, None, ""
 
         if act == "pos":
-            return self._text_ov_pos(), _kb_position("ovpos"), ""
+            return self._text_ov_txt_pos(), _kb_position("ovtxtpos"), ""
 
         if act == "opacity":
             self._awaiting = "ov:textopacity"
             await self._send_prompt(
-                f"Current: {self.cfg.overlay.opacity:.2f}\n"
+                f"Current: {self.cfg.overlay.text_opacity:.2f}\n"
                 "Send text opacity (0.0\u20131.0):"
             )
             return None, None, ""
@@ -598,27 +806,28 @@ class TelegramBot:
 
         return self._text_ov_text(), _kb_ov_text(self.cfg), ""
 
-    async def _cb_ov_pos(self, p):
+    async def _cb_ov_txt_pos(self, p):
         act = p[1] if len(p) > 1 else "menu"
 
         if act == "menu":
-            return self._text_ov_pos(), _kb_position("ovpos"), ""
+            return self._text_ov_txt_pos(), _kb_position("ovtxtpos"), ""
 
         if act == "custom":
-            self._awaiting = "ov:custompos"
+            self._awaiting = "ov:txtcustompos"
             await self._send_prompt(
                 "Send coordinates as <code>x,y</code> (pixels):"
             )
             return None, None, ""
 
-        # Position preset
         if act in POSITION_PRESETS and act != "custom":
-            self.cfg.overlay.position = act
+            self.cfg.overlay.text_position = act
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return (
-                self._text_ov_pos() + f"\n\n\u2705 {act}",
-                _kb_position("ovpos"), act,
+                self._text_ov_txt_pos() + f"\n\n\u2705 {act}",
+                _kb_position("ovtxtpos"), act,
             )
 
     # -- Targets -----------------------------------------------------------
@@ -639,7 +848,9 @@ class TelegramBot:
             if 0 <= idx < len(self.cfg.output.targets):
                 removed = self.cfg.output.targets.pop(idx)
                 if self.cfg.output.targets:
-                    await self.manager.reload_output()
+                    await self._reload_output()
+                else:
+                    self._save_state()
                 return (
                     self._text_targets()
                     + f"\n\n\u2705 Removed:\n<code>{removed}</code>",
@@ -675,7 +886,7 @@ class TelegramBot:
             preset = act[2:]
             if preset in _X264_PRESETS:
                 self.cfg.output.video.preset = preset
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return (
                     self._text_output() + f"\n\n\u2705 Preset \u2192 {preset}",
                     _kb_out(self.cfg), preset,
@@ -720,38 +931,108 @@ class TelegramBot:
             val = text.strip().strip("\"'")
             if val.lower() == "off":
                 self.cfg.placeholder.text = None
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return "\u2705 Placeholder text removed", _kb_ph_text(self.cfg)
             self.cfg.placeholder.text = val
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return (
                 f"\u2705 Placeholder text:\n<code>{val}</code>",
                 _kb_ph_text(self.cfg),
             )
 
-        if action in ("ph:image", "ph:video"):
-            kind = action.split(":")[1]
+        if action == "ph:image":
             if not os.path.isfile(text):
-                return f"\u274c File not found: <code>{text}</code>", _kb_ph(self.cfg)
-            self.cfg.placeholder.type = kind
-            self.cfg.placeholder.path = text
-            await self.manager.reload_compositor()
-            label = "\U0001f5bc" if kind == "image" else "\U0001f3ac"
+                return f"\u274c File not found: <code>{text}</code>", _kb_ph_image(self.cfg)
+            self.cfg.placeholder.image_path = text
+            await self._reload_compositor()
             return (
-                f"\u2705 Placeholder {kind}:\n{label} <code>{text}</code>",
-                _kb_ph(self.cfg),
+                f"\u2705 Placeholder image:\n\U0001f5bc <code>{text}</code>",
+                _kb_ph_image(self.cfg),
             )
 
-        if action == "ph:opacity":
+        if action == "ph:video":
+            if not os.path.isfile(text):
+                return f"\u274c File not found: <code>{text}</code>", _kb_ph_video(self.cfg)
+            self.cfg.placeholder.video_path = text
+            await self._reload_compositor()
+            return (
+                f"\u2705 Placeholder video:\n\U0001f3ac <code>{text}</code>",
+                _kb_ph_video(self.cfg),
+            )
+
+        if action == "ph:imgopacity":
             try:
                 v = float(text)
             except (ValueError, TypeError):
-                return "\u274c Must be a number 0.0\u20131.0", _kb_ph(self.cfg)
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ph_image(self.cfg)
             if not 0.0 <= v <= 1.0:
-                return "\u274c Must be 0.0\u20131.0", _kb_ph(self.cfg)
-            self.cfg.placeholder.opacity = v
-            await self.manager.reload_compositor()
-            return f"\u2705 Opacity: {v:.2f}", _kb_ph(self.cfg)
+                return "\u274c Must be 0.0\u20131.0", _kb_ph_image(self.cfg)
+            self.cfg.placeholder.image_opacity = v
+            await self._reload_compositor()
+            return f"\u2705 Image opacity: {v:.2f}", _kb_ph_image(self.cfg)
+
+        if action == "ph:imgmaxh":
+            try:
+                v = int(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be an integer", _kb_ph_image(self.cfg)
+            if v < 0:
+                return "\u274c Must be >= 0 (0 = full frame)", _kb_ph_image(self.cfg)
+            self.cfg.placeholder.image_max_height = v
+            await self._reload_compositor()
+            label = f"{v}px" if v > 0 else "full frame"
+            return f"\u2705 Max height: {label}", _kb_ph_image(self.cfg)
+
+        if action == "ph:imgcustompos":
+            parts = text.replace(" ", "").split(",")
+            if len(parts) != 2:
+                return "\u274c Format: <code>x,y</code>", _kb_position("phimgpos")
+            try:
+                x, y = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                return "\u274c Coordinates must be integers", _kb_position("phimgpos")
+            self.cfg.placeholder.image_position = "custom"
+            self.cfg.placeholder.image_x = x
+            self.cfg.placeholder.image_y = y
+            await self._reload_compositor()
+            return f"\u2705 Position: ({x},{y})", _kb_position("phimgpos")
+
+        if action == "ph:vidopacity":
+            try:
+                v = float(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ph_video(self.cfg)
+            if not 0.0 <= v <= 1.0:
+                return "\u274c Must be 0.0\u20131.0", _kb_ph_video(self.cfg)
+            self.cfg.placeholder.video_opacity = v
+            await self._reload_compositor()
+            return f"\u2705 Video opacity: {v:.2f}", _kb_ph_video(self.cfg)
+
+        if action == "ph:vidmaxh":
+            try:
+                v = int(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be an integer", _kb_ph_video(self.cfg)
+            if v < 0:
+                return "\u274c Must be >= 0 (0 = full frame)", _kb_ph_video(self.cfg)
+            self.cfg.placeholder.video_max_height = v
+            await self._reload_compositor()
+            label = f"{v}px" if v > 0 else "full frame"
+            return f"\u2705 Max height: {label}", _kb_ph_video(self.cfg)
+
+        if action == "ph:vidcustompos":
+            parts = text.replace(" ", "").split(",")
+            if len(parts) != 2:
+                return "\u274c Format: <code>x,y</code>", _kb_position("phvidpos")
+            try:
+                x, y = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                return "\u274c Coordinates must be integers", _kb_position("phvidpos")
+            self.cfg.placeholder.video_position = "custom"
+            self.cfg.placeholder.video_x = x
+            self.cfg.placeholder.video_y = y
+            await self._reload_compositor()
+            return f"\u2705 Position: ({x},{y})", _kb_position("phvidpos")
 
         if action == "ph:fontsize":
             try:
@@ -761,12 +1042,12 @@ class TelegramBot:
             if not 8 <= v <= 500:
                 return "\u274c Font size must be 8\u2013500", _kb_ph_text(self.cfg)
             self.cfg.placeholder.font_size = v
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Font size: {v}px", _kb_ph_text(self.cfg)
 
         if action == "ph:fontcolor":
             self.cfg.placeholder.font_color = text.strip()
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Color: {text.strip()}", _kb_ph_text(self.cfg)
 
         if action == "ph:textopacity":
@@ -776,8 +1057,8 @@ class TelegramBot:
                 return "\u274c Must be a number 0.0\u20131.0", _kb_ph_text(self.cfg)
             if not 0.0 <= v <= 1.0:
                 return "\u274c Must be 0.0\u20131.0", _kb_ph_text(self.cfg)
-            self.cfg.placeholder.opacity = v
-            await self.manager.reload_compositor()
+            self.cfg.placeholder.text_opacity = v
+            await self._reload_compositor()
             return f"\u2705 Text opacity: {v:.2f}", _kb_ph_text(self.cfg)
 
         if action == "ph:font":
@@ -788,7 +1069,7 @@ class TelegramBot:
                 self.cfg.placeholder.font_path = val
             else:
                 return f"\u274c File not found: <code>{val}</code>", _kb_ph_text(self.cfg)
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Font: {val}", _kb_ph_text(self.cfg)
 
         if action == "ph:custompos":
@@ -800,54 +1081,89 @@ class TelegramBot:
             except (ValueError, TypeError):
                 return "\u274c Coordinates must be integers", _kb_position("phpos")
             self.cfg.placeholder.text_position = "custom"
-            self.cfg.placeholder.x = x
-            self.cfg.placeholder.y = y
-            await self.manager.reload_compositor()
+            self.cfg.placeholder.text_x = x
+            self.cfg.placeholder.text_y = y
+            await self._reload_compositor()
             return f"\u2705 Position: ({x},{y})", _kb_position("phpos")
 
-        # -- Overlay --
-        if action == "ov:text":
-            self.cfg.overlay.enabled = True
-            self.cfg.overlay.type = "text"
-            self.cfg.overlay.text = text.strip("\"'")
-            await self.manager.reload_compositor()
-            return f"\u2705 Overlay text:\n<code>{text}</code>", _kb_ov_text(self.cfg)
-
+        # -- Overlay Image --
         if action == "ov:image":
             if not os.path.isfile(text):
-                return f"\u274c File not found: <code>{text}</code>", _kb_ov(self.cfg)
+                return f"\u274c File not found: <code>{text}</code>", _kb_ov_image(self.cfg)
             self.cfg.overlay.enabled = True
-            self.cfg.overlay.type = "image"
             self.cfg.overlay.path = text
-            await self.manager.reload_compositor()
-            return f"\u2705 Overlay image:\n<code>{text}</code>", _kb_ov(self.cfg)
+            await self._reload_compositor()
+            return f"\u2705 Overlay image:\n<code>{text}</code>", _kb_ov_image(self.cfg)
 
-        if action == "ov:custompos":
+        if action == "ov:imgcustompos":
             parts = text.replace(" ", "").split(",")
             if len(parts) != 2:
-                return "\u274c Format: <code>x,y</code>", _kb_position("ovpos")
+                return "\u274c Format: <code>x,y</code>", _kb_position("ovimgpos")
             try:
                 x, y = int(parts[0]), int(parts[1])
             except (ValueError, TypeError):
-                return "\u274c Coordinates must be integers", _kb_position("ovpos")
-            self.cfg.overlay.position = "custom"
-            self.cfg.overlay.x = x
-            self.cfg.overlay.y = y
+                return "\u274c Coordinates must be integers", _kb_position("ovimgpos")
+            self.cfg.overlay.image_position = "custom"
+            self.cfg.overlay.image_x = x
+            self.cfg.overlay.image_y = y
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
-            return f"\u2705 Position: ({x},{y})", _kb_position("ovpos")
+                await self._reload_compositor()
+            else:
+                self._save_state()
+            return f"\u2705 Position: ({x},{y})", _kb_position("ovimgpos")
 
-        if action == "ov:opacity":
+        if action == "ov:imgopacity":
             try:
                 v = float(text)
             except (ValueError, TypeError):
-                return "\u274c Must be a number 0.0\u20131.0", _kb_ov(self.cfg)
+                return "\u274c Must be a number 0.0\u20131.0", _kb_ov_image(self.cfg)
             if not 0.0 <= v <= 1.0:
-                return "\u274c Must be 0.0\u20131.0", _kb_ov(self.cfg)
-            self.cfg.overlay.opacity = v
+                return "\u274c Must be 0.0\u20131.0", _kb_ov_image(self.cfg)
+            self.cfg.overlay.image_opacity = v
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
-            return f"\u2705 Opacity: {v:.2f}", _kb_ov(self.cfg)
+                await self._reload_compositor()
+            else:
+                self._save_state()
+            return f"\u2705 Image opacity: {v:.2f}", _kb_ov_image(self.cfg)
+
+        if action == "ov:imgmaxh":
+            try:
+                v = int(text)
+            except (ValueError, TypeError):
+                return "\u274c Must be an integer", _kb_ov_image(self.cfg)
+            if v < 0:
+                return "\u274c Must be >= 0 (0 = original)", _kb_ov_image(self.cfg)
+            self.cfg.overlay.image_max_height = v
+            if self.cfg.overlay.enabled:
+                await self._reload_compositor()
+            else:
+                self._save_state()
+            label = f"{v}px" if v > 0 else "original"
+            return f"\u2705 Max height: {label}", _kb_ov_image(self.cfg)
+
+        # -- Overlay Text --
+        if action == "ov:text":
+            self.cfg.overlay.enabled = True
+            self.cfg.overlay.text = text.strip("\"'")
+            await self._reload_compositor()
+            return f"\u2705 Overlay text:\n<code>{text}</code>", _kb_ov_text(self.cfg)
+
+        if action == "ov:txtcustompos":
+            parts = text.replace(" ", "").split(",")
+            if len(parts) != 2:
+                return "\u274c Format: <code>x,y</code>", _kb_position("ovtxtpos")
+            try:
+                x, y = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError):
+                return "\u274c Coordinates must be integers", _kb_position("ovtxtpos")
+            self.cfg.overlay.text_position = "custom"
+            self.cfg.overlay.text_x = x
+            self.cfg.overlay.text_y = y
+            if self.cfg.overlay.enabled:
+                await self._reload_compositor()
+            else:
+                self._save_state()
+            return f"\u2705 Position: ({x},{y})", _kb_position("ovtxtpos")
 
         if action == "ov:textopacity":
             try:
@@ -856,9 +1172,11 @@ class TelegramBot:
                 return "\u274c Must be a number 0.0\u20131.0", _kb_ov_text(self.cfg)
             if not 0.0 <= v <= 1.0:
                 return "\u274c Must be 0.0\u20131.0", _kb_ov_text(self.cfg)
-            self.cfg.overlay.opacity = v
+            self.cfg.overlay.text_opacity = v
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Text opacity: {v:.2f}", _kb_ov_text(self.cfg)
 
         if action == "ov:size":
@@ -870,13 +1188,17 @@ class TelegramBot:
                 return "\u274c Font size must be 8\u2013500", _kb_ov_text(self.cfg)
             self.cfg.overlay.font_size = v
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Font size: {v}px", _kb_ov_text(self.cfg)
 
         if action == "ov:color":
             self.cfg.overlay.font_color = text.strip()
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Color: {text.strip()}", _kb_ov_text(self.cfg)
 
         if action == "ov:font":
@@ -888,7 +1210,9 @@ class TelegramBot:
             else:
                 return f"\u274c File not found: <code>{val}</code>", _kb_ov_text(self.cfg)
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Font: {val}", _kb_ov_text(self.cfg)
 
         # -- Targets --
@@ -903,7 +1227,7 @@ class TelegramBot:
             if url in self.cfg.output.targets:
                 return f"Already present:\n<code>{url}</code>", _kb_targets(self.cfg)
             self.cfg.output.targets.append(url)
-            await self.manager.reload_output()
+            await self._reload_output()
             return f"\u2705 Added:\n<code>{url}</code>", _kb_targets(self.cfg)
 
         # -- Output encoding --
@@ -917,7 +1241,7 @@ class TelegramBot:
                     _kb_out(self.cfg),
                 )
             self.cfg.output.video.bitrate = normalized
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Bitrate: {normalized}", _kb_out(self.cfg)
 
         if action == "out:fps":
@@ -929,7 +1253,7 @@ class TelegramBot:
                 return f"\u274c FPS must be {_MIN_FPS}\u2013{_MAX_FPS}", _kb_out(self.cfg)
             self.cfg.output.video.fps = fps
             self.cfg.output.video.gop = fps * 2
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 FPS: {fps} (gop={fps * 2})", _kb_out(self.cfg)
 
         if action == "out:size":
@@ -946,7 +1270,7 @@ class TelegramBot:
                 )
             self.cfg.output.video.width = w
             self.cfg.output.video.height = h
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Size: {w}\u00d7{h}", _kb_out(self.cfg)
 
         return "\u274c Unknown action", [[_btn("\u25c0\ufe0f Menu", "menu:main")]]
@@ -1000,17 +1324,10 @@ class TelegramBot:
 
         sub = args[0].lower()
 
-        if sub == "black":
-            self.cfg.placeholder.type = "black"
-            self.cfg.placeholder.path = None
-            await self.manager.reload_compositor()
-            return "\u2705 Placeholder \u2192 black"
-
-        if sub == "testcard":
-            self.cfg.placeholder.type = "testcard"
-            self.cfg.placeholder.path = None
-            await self.manager.reload_compositor()
-            return "\u2705 Placeholder \u2192 testcard"
+        if sub in ("black", "testcard"):
+            self.cfg.placeholder.background = sub
+            await self._reload_compositor()
+            return f"\u2705 Background \u2192 {sub}"
 
         if sub == "text":
             text = arg_str[len("text"):].strip().strip("\"'")
@@ -1018,27 +1335,44 @@ class TelegramBot:
                 return "Usage: /placeholder text <text>  (or 'off' to remove)"
             if text.lower() == "off":
                 self.cfg.placeholder.text = None
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return "\u2705 Placeholder text removed"
             self.cfg.placeholder.text = text
-            await self.manager.reload_compositor()
-            return f"\u2705 Placeholder text overlay: <code>{text}</code>"
+            await self._reload_compositor()
+            return f"\u2705 Placeholder text: <code>{text}</code>"
 
-        if sub in ("image", "video"):
-            path = arg_str[len(sub):].strip()
+        if sub == "image":
+            path = arg_str[len("image"):].strip()
             if not path:
-                return f"Usage: /placeholder {sub} <path>"
+                return "Usage: /placeholder image <path>  (or 'off' to remove)"
+            if path.lower() == "off":
+                self.cfg.placeholder.image_path = None
+                await self._reload_compositor()
+                return "\u2705 Placeholder image removed"
             if not os.path.isfile(path):
                 return f"\u274c File not found: <code>{path}</code>"
-            self.cfg.placeholder.type = sub
-            self.cfg.placeholder.path = path
-            await self.manager.reload_compositor()
-            return f"\u2705 Placeholder \u2192 {sub}: <code>{path}</code>"
+            self.cfg.placeholder.image_path = path
+            await self._reload_compositor()
+            return f"\u2705 Placeholder image: <code>{path}</code>"
+
+        if sub == "video":
+            path = arg_str[len("video"):].strip()
+            if not path:
+                return "Usage: /placeholder video <path>  (or 'off' to remove)"
+            if path.lower() == "off":
+                self.cfg.placeholder.video_path = None
+                await self._reload_compositor()
+                return "\u2705 Placeholder video removed"
+            if not os.path.isfile(path):
+                return f"\u274c File not found: <code>{path}</code>"
+            self.cfg.placeholder.video_path = path
+            await self._reload_compositor()
+            return f"\u2705 Placeholder video: <code>{path}</code>"
 
         if sub == "opacity":
             return await _set_float(
-                args, self.cfg.placeholder, "opacity",
-                0.0, 1.0, self.manager.reload_compositor, "Opacity",
+                args, self.cfg.placeholder, "image_opacity",
+                0.0, 1.0, self._reload_compositor, "Image opacity",
             )
 
         if sub in ("pos", "position"):
@@ -1054,7 +1388,7 @@ class TelegramBot:
                 )
             if val in POSITION_PRESETS and val != "custom":
                 self.cfg.placeholder.text_position = val
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return f"\u2705 Text position: {val}"
             if val == "custom" or "," in val:
                 coords = val.replace("custom", "").strip().strip(",").strip()
@@ -1068,9 +1402,9 @@ class TelegramBot:
                 except ValueError:
                     return "\u274c Coordinates must be integers"
                 self.cfg.placeholder.text_position = "custom"
-                self.cfg.placeholder.x = x
-                self.cfg.placeholder.y = y
-                await self.manager.reload_compositor()
+                self.cfg.placeholder.text_x = x
+                self.cfg.placeholder.text_y = y
+                await self._reload_compositor()
                 return f"\u2705 Text position: custom ({x},{y})"
             return f"\u274c Unknown position: <code>{val}</code>"
 
@@ -1084,75 +1418,69 @@ class TelegramBot:
 
         sub = args[0].lower()
         reload_fn = (
-            self.manager.reload_compositor if self.cfg.overlay.enabled else None
+            self._reload_compositor if self.cfg.overlay.enabled
+            else self._save_state_async
         )
 
         if sub == "off":
             self.cfg.overlay.enabled = False
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return "\u2705 Overlay disabled"
+
+        if sub == "on":
+            self.cfg.overlay.enabled = True
+            await self._reload_compositor()
+            return "\u2705 Overlay enabled"
 
         if sub == "text":
             text = arg_str[len("text"):].strip().strip("\"'")
             if not text:
                 return "Usage: /overlay text <text>"
+            if text.lower() == "off":
+                self.cfg.overlay.text = None
+                if self.cfg.overlay.enabled:
+                    await self._reload_compositor()
+                else:
+                    self._save_state()
+                return "\u2705 Overlay text removed"
             self.cfg.overlay.enabled = True
-            self.cfg.overlay.type = "text"
             self.cfg.overlay.text = text
-            await self.manager.reload_compositor()
-            return f"\u2705 Overlay \u2192 text: <code>{text}</code>"
+            await self._reload_compositor()
+            return f"\u2705 Overlay text: <code>{text}</code>"
 
         if sub == "image":
             path = arg_str[len("image"):].strip()
             if not path:
                 return "Usage: /overlay image <path>"
+            if path.lower() == "off":
+                self.cfg.overlay.path = None
+                if self.cfg.overlay.enabled:
+                    await self._reload_compositor()
+                else:
+                    self._save_state()
+                return "\u2705 Overlay image removed"
             if not os.path.isfile(path):
                 return f"\u274c File not found: <code>{path}</code>"
             self.cfg.overlay.enabled = True
-            self.cfg.overlay.type = "image"
             self.cfg.overlay.path = path
-            await self.manager.reload_compositor()
-            return f"\u2705 Overlay \u2192 image: <code>{path}</code>"
+            await self._reload_compositor()
+            return f"\u2705 Overlay image: <code>{path}</code>"
 
-        if sub in ("pos", "position"):
-            val = arg_str[len(sub):].strip()
-            if not val:
-                presets = ", ".join(
-                    p for p in POSITION_PRESETS if p != "custom"
-                )
-                return (
-                    "Usage: /overlay pos <preset>\n"
-                    f"Presets: {presets}\n"
-                    "Or: /overlay pos custom <x>,<y>"
-                )
-            if val in POSITION_PRESETS and val != "custom":
-                self.cfg.overlay.position = val
-                if self.cfg.overlay.enabled:
-                    await self.manager.reload_compositor()
-                return f"\u2705 Overlay position: {val}"
-            if val == "custom" or "," in val:
-                coords = val.replace("custom", "").strip().strip(",").strip()
-                if not coords:
-                    return "Usage: /overlay pos custom <x>,<y>"
-                parts = coords.replace(" ", "").split(",")
-                if len(parts) != 2:
-                    return "\u274c Format: <code>x,y</code>"
-                try:
-                    x, y = int(parts[0]), int(parts[1])
-                except ValueError:
-                    return "\u274c Coordinates must be integers"
-                self.cfg.overlay.position = "custom"
-                self.cfg.overlay.x = x
-                self.cfg.overlay.y = y
-                if self.cfg.overlay.enabled:
-                    await self.manager.reload_compositor()
-                return f"\u2705 Overlay position: custom ({x},{y})"
-            return f"\u274c Unknown position: <code>{val}</code>"
+        if sub == "maxheight":
+            return await _set_int(
+                args, self.cfg.overlay, "image_max_height",
+                reload_fn, "Image max height",
+            )
 
         if sub == "opacity":
             return await _set_float(
-                args, self.cfg.overlay, "opacity",
-                0.0, 1.0, reload_fn, "Overlay opacity",
+                args, self.cfg.overlay, "image_opacity",
+                0.0, 1.0, reload_fn, "Image opacity",
+            )
+        if sub == "textopacity":
+            return await _set_float(
+                args, self.cfg.overlay, "text_opacity",
+                0.0, 1.0, reload_fn, "Text opacity",
             )
         if sub == "size":
             return await _set_int(
@@ -1163,7 +1491,9 @@ class TelegramBot:
                 return "Usage: /overlay color <name or #RRGGBB>"
             self.cfg.overlay.font_color = args[1]
             if self.cfg.overlay.enabled:
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
+            else:
+                self._save_state()
             return f"\u2705 Color \u2192 {args[1]}"
 
         return f"\u2753 Unknown: /overlay {sub}"
@@ -1185,7 +1515,7 @@ class TelegramBot:
             if url in self.cfg.output.targets:
                 return f"Already present: <code>{url}</code>"
             self.cfg.output.targets.append(url)
-            await self.manager.reload_output()
+            await self._reload_output()
             return f"\u2705 Added: <code>{url}</code>"
 
         if sub == "remove":
@@ -1196,7 +1526,9 @@ class TelegramBot:
                 return f"Not in list: <code>{url}</code>"
             self.cfg.output.targets.remove(url)
             if self.cfg.output.targets:
-                await self.manager.reload_output()
+                await self._reload_output()
+            else:
+                self._save_state()
             return f"\u2705 Removed: <code>{url}</code>"
 
         if sub == "set":
@@ -1205,7 +1537,7 @@ class TelegramBot:
             if not _is_valid_rtmp_url(args[1]):
                 return "\u274c URL must start with rtmp:// or rtmps://"
             self.cfg.output.targets = [args[1]]
-            await self.manager.reload_output()
+            await self._reload_output()
             return f"\u2705 Target set: <code>{args[1]}</code>"
 
         return f"\u2753 Unknown: /target {sub}"
@@ -1229,7 +1561,7 @@ class TelegramBot:
                     f"Range: {_MIN_BITRATE_KBPS}k\u2013{_MAX_BITRATE_KBPS}k"
                 )
             self.cfg.output.video.bitrate = normalized
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Bitrate \u2192 {normalized}"
 
         if sub == "fps":
@@ -1241,7 +1573,7 @@ class TelegramBot:
                     raise ValueError
                 self.cfg.output.video.fps = fps
                 self.cfg.output.video.gop = fps * 2
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return f"\u2705 FPS \u2192 {fps} (gop={fps * 2})"
             except ValueError:
                 return f"\u274c FPS must be {_MIN_FPS}\u2013{_MAX_FPS}"
@@ -1257,7 +1589,7 @@ class TelegramBot:
                     raise ValueError
                 self.cfg.output.video.width = w
                 self.cfg.output.video.height = h
-                await self.manager.reload_compositor()
+                await self._reload_compositor()
                 return f"\u2705 Size \u2192 {w}\u00d7{h}"
             except (ValueError, TypeError):
                 return (
@@ -1273,7 +1605,7 @@ class TelegramBot:
                     f"<{' | '.join(sorted(_X264_PRESETS))}>"
                 )
             self.cfg.output.video.preset = args[1]
-            await self.manager.reload_compositor()
+            await self._reload_compositor()
             return f"\u2705 Preset \u2192 {args[1]}"
 
         return f"\u2753 Unknown: /output {sub}"
@@ -1315,30 +1647,39 @@ class TelegramBot:
         else:
             state = "\u26ab <b>IDLE</b> (placeholder active)"
 
-        ph_desc = ph.type
-        if ph.path:
-            ph_desc += f": <code>{os.path.basename(ph.path)}</code>"
+        ph_desc = f"bg={ph.background}"
+        if ph.image_path:
+            ph_desc += f"\n  image: <code>{os.path.basename(ph.image_path)}</code>"
+            if ph.image_opacity < 1.0:
+                ph_desc += f" opacity={ph.image_opacity:.2f}"
+        if ph.video_path:
+            ph_desc += f"\n  video: <code>{os.path.basename(ph.video_path)}</code>"
         if ph.text:
             ph_desc += f"\n  text: <code>{ph.text}</code>"
             pos_str = ph.text_position
             if pos_str == "custom":
-                pos_str += f" ({ph.x},{ph.y})"
+                pos_str += f" ({ph.text_x},{ph.text_y})"
             ph_desc += f" [{pos_str}]"
-        if ph.opacity < 1.0:
-            ph_desc += f" opacity={ph.opacity:.2f}"
+            if ph.text_opacity < 1.0:
+                ph_desc += f" opacity={ph.text_opacity:.2f}"
 
         if ov.enabled:
-            ov_desc = (
-                f"text <code>{ov.text}</code>"
-                if ov.type == "text"
-                else f"image <code>{os.path.basename(ov.path or '')}</code>"
-            )
-            pos_str = ov.position
-            if pos_str == "custom":
-                pos_str += f" ({ov.x},{ov.y})"
-            ov_desc += f" [{pos_str}]"
-            if ov.opacity < 1.0:
-                ov_desc += f" opacity={ov.opacity:.2f}"
+            parts = []
+            if ov.path:
+                img_desc = f"image <code>{os.path.basename(ov.path)}</code>"
+                if ov.image_max_height > 0:
+                    img_desc += f" (max {ov.image_max_height}px)"
+                img_desc += f" [{ov.image_position}]"
+                if ov.image_opacity < 1.0:
+                    img_desc += f" opacity={ov.image_opacity:.2f}"
+                parts.append(img_desc)
+            if ov.text:
+                txt_desc = f"text <code>{ov.text}</code>"
+                txt_desc += f" [{ov.text_position}]"
+                if ov.text_opacity < 1.0:
+                    txt_desc += f" opacity={ov.text_opacity:.2f}"
+                parts.append(txt_desc)
+            ov_desc = " + ".join(parts) if parts else "enabled (no layers)"
         else:
             ov_desc = "disabled"
 
@@ -1371,12 +1712,58 @@ class TelegramBot:
 
     def _text_ph(self) -> str:
         ph = self.cfg.placeholder
-        desc = f"<b>Placeholder:</b> {ph.type}"
-        if ph.path:
-            desc += f"\nFile: <code>{os.path.basename(ph.path)}</code>"
+        desc = f"<b>Placeholder</b>\nBackground: {ph.background}"
+        if ph.image_path:
+            desc += f"\n\U0001f5bc Image: <code>{os.path.basename(ph.image_path)}</code>"
+            desc += f" (opacity: {ph.image_opacity:.2f})"
+        if ph.video_path:
+            desc += f"\n\U0001f3ac Video: <code>{os.path.basename(ph.video_path)}</code>"
         if ph.text:
-            desc += f"\nText: <code>{ph.text}</code>"
-        desc += f"\nOpacity: {ph.opacity:.2f}"
+            desc += f"\n\U0001f4dd Text: <code>{ph.text}</code>"
+        return desc
+
+    def _text_ph_image(self) -> str:
+        ph = self.cfg.placeholder
+        desc = "\U0001f5bc <b>Placeholder Image</b>\n"
+        if ph.image_path:
+            desc += f"File: <code>{os.path.basename(ph.image_path)}</code>\n"
+            desc += f"Position: {ph.image_position}"
+            if ph.image_position == "custom":
+                desc += f" ({ph.image_x},{ph.image_y})"
+            desc += f"\nOpacity: {ph.image_opacity:.2f}"
+            mh = ph.image_max_height
+            desc += f"\nMax height: {f'{mh}px' if mh > 0 else 'full frame'}"
+        else:
+            desc += "No image configured"
+        return desc
+
+    def _text_ph_img_pos(self) -> str:
+        ph = self.cfg.placeholder
+        desc = f"\U0001f4cd <b>Image Position</b>\nCurrent: {ph.image_position}"
+        if ph.image_position == "custom":
+            desc += f" ({ph.image_x},{ph.image_y})"
+        return desc
+
+    def _text_ph_video(self) -> str:
+        ph = self.cfg.placeholder
+        desc = "\U0001f3ac <b>Placeholder Video</b>\n"
+        if ph.video_path:
+            desc += f"File: <code>{os.path.basename(ph.video_path)}</code>\n"
+            desc += f"Position: {ph.video_position}"
+            if ph.video_position == "custom":
+                desc += f" ({ph.video_x},{ph.video_y})"
+            desc += f"\nOpacity: {ph.video_opacity:.2f}"
+            mh = ph.video_max_height
+            desc += f"\nMax height: {f'{mh}px' if mh > 0 else 'full frame'}"
+        else:
+            desc += "No video configured"
+        return desc
+
+    def _text_ph_vid_pos(self) -> str:
+        ph = self.cfg.placeholder
+        desc = f"\U0001f4cd <b>Video Position</b>\nCurrent: {ph.video_position}"
+        if ph.video_position == "custom":
+            desc += f" ({ph.video_x},{ph.video_y})"
         return desc
 
     def _text_ph_text(self) -> str:
@@ -1387,8 +1774,8 @@ class TelegramBot:
             desc += f"Size: {ph.font_size}px | Color: {ph.font_color}\n"
             desc += f"Position: {ph.text_position}"
             if ph.text_position == "custom":
-                desc += f" ({ph.x},{ph.y})"
-            desc += f"\nOpacity: {ph.opacity:.2f}"
+                desc += f" ({ph.text_x},{ph.text_y})"
+            desc += f"\nOpacity: {ph.text_opacity:.2f}"
             if ph.font_path:
                 desc += f"\nFont: <code>{os.path.basename(ph.font_path)}</code>"
         else:
@@ -1399,47 +1786,66 @@ class TelegramBot:
         ph = self.cfg.placeholder
         desc = f"\U0001f4cd <b>Text Position</b>\nCurrent: {ph.text_position}"
         if ph.text_position == "custom":
-            desc += f" ({ph.x},{ph.y})"
+            desc += f" ({ph.text_x},{ph.text_y})"
         return desc
 
     def _text_ov(self) -> str:
         ov = self.cfg.overlay
         status = "enabled" if ov.enabled else "disabled"
         desc = f"<b>Overlay:</b> {status}"
-        if ov.enabled:
-            if ov.type == "text":
-                desc += f"\nType: text \u2014 <code>{ov.text}</code>"
-            else:
-                desc += f"\nType: image \u2014 <code>{os.path.basename(ov.path or '')}</code>"
-            desc += f"\nPosition: {ov.position}"
-            if ov.position == "custom":
-                desc += f" ({ov.x},{ov.y})"
-            desc += f"\nOpacity: {ov.opacity:.2f}"
-            if ov.type == "text":
-                desc += f"\nFont: {ov.font_size}px {ov.font_color}"
+        if ov.path:
+            desc += f"\n\U0001f5bc Image: <code>{os.path.basename(ov.path)}</code>"
+            if ov.image_max_height > 0:
+                desc += f" (max {ov.image_max_height}px)"
+        if ov.text:
+            desc += f"\n\U0001f4dd Text: <code>{ov.text}</code>"
+        if not ov.path and not ov.text:
+            desc += "\n(no layers configured)"
+        return desc
+
+    def _text_ov_image(self) -> str:
+        ov = self.cfg.overlay
+        desc = "\U0001f5bc <b>Overlay Image</b>\n"
+        if ov.path:
+            desc += f"File: <code>{os.path.basename(ov.path)}</code>\n"
+        else:
+            desc += "File: (not set)\n"
+        desc += f"Position: {ov.image_position}"
+        if ov.image_position == "custom":
+            desc += f" ({ov.image_x},{ov.image_y})"
+        desc += f"\nOpacity: {ov.image_opacity:.2f}"
+        mh = ov.image_max_height
+        desc += f"\nMax height: {f'{mh}px' if mh > 0 else 'original'}"
         return desc
 
     def _text_ov_text(self) -> str:
         ov = self.cfg.overlay
-        desc = f"\U0001f4dd <b>Overlay Text</b>\n"
+        desc = "\U0001f4dd <b>Overlay Text</b>\n"
         if ov.text:
             desc += f"Text: <code>{ov.text}</code>\n"
         else:
             desc += "Text: (not set)\n"
         desc += f"Size: {ov.font_size}px | Color: {ov.font_color}\n"
-        desc += f"Position: {ov.position}"
-        if ov.position == "custom":
-            desc += f" ({ov.x},{ov.y})"
-        desc += f"\nOpacity: {ov.opacity:.2f}"
+        desc += f"Position: {ov.text_position}"
+        if ov.text_position == "custom":
+            desc += f" ({ov.text_x},{ov.text_y})"
+        desc += f"\nOpacity: {ov.text_opacity:.2f}"
         if ov.font_path:
             desc += f"\nFont: <code>{os.path.basename(ov.font_path)}</code>"
         return desc
 
-    def _text_ov_pos(self) -> str:
+    def _text_ov_img_pos(self) -> str:
         ov = self.cfg.overlay
-        desc = f"\U0001f4cd <b>Overlay Position</b>\nCurrent: {ov.position}"
-        if ov.position == "custom":
-            desc += f" ({ov.x},{ov.y})"
+        desc = f"\U0001f4cd <b>Image Position</b>\nCurrent: {ov.image_position}"
+        if ov.image_position == "custom":
+            desc += f" ({ov.image_x},{ov.image_y})"
+        return desc
+
+    def _text_ov_txt_pos(self) -> str:
+        ov = self.cfg.overlay
+        desc = f"\U0001f4cd <b>Text Position</b>\nCurrent: {ov.text_position}"
+        if ov.text_position == "custom":
+            desc += f" ({ov.text_x},{ov.text_y})"
         return desc
 
     def _text_targets(self) -> str:
@@ -1510,22 +1916,59 @@ def _kb_status():
 
 def _kb_ph(cfg: Config):
     ph = cfg.placeholder
-    check = lambda t: " \u2705" if ph.type == t else ""
-    text_label = "\U0001f4dd Text \u25b8" if ph.text else "\U0001f4dd Text \u25b8"
+    bg_check = lambda t: " \u2705" if ph.background == t else ""
+    img_label = "\U0001f5bc Image \u2705" if ph.image_path else "\U0001f5bc Image"
+    vid_label = "\U0001f3ac Video \u2705" if ph.video_path else "\U0001f3ac Video"
+    txt_label = "\U0001f4dd Text \u2705" if ph.text else "\U0001f4dd Text"
     rows = [
         [
-            _btn(f"\u2b1b Black{check('black')}", "ph:black"),
-            _btn(f"\U0001f4fa Testcard{check('testcard')}", "ph:testcard"),
+            _btn(f"\u2b1b Black{bg_check('black')}", "ph:black"),
+            _btn(f"\U0001f4fa Testcard{bg_check('testcard')}", "ph:testcard"),
         ],
         [
-            _btn(f"\U0001f5bc Image{check('image')}", "ph:image"),
-            _btn(f"\U0001f3ac Video{check('video')}", "ph:video"),
+            _btn(f"{img_label} \u25b8", "phimg:menu"),
+            _btn(f"{vid_label} \u25b8", "phvid:menu"),
         ],
-        [
-            _btn(text_label, "phtxt:menu"),
-            _btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "ph:opacity"),
-        ],
+        [_btn(f"{txt_label} \u25b8", "phtxt:menu")],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
+    ]
+    return rows
+
+
+def _kb_ph_image(cfg: Config):
+    ph = cfg.placeholder
+    mh = ph.image_max_height
+    mh_label = f"{mh}px" if mh > 0 else "full"
+    rows = [
+        [
+            _btn("\U0001f4f7 Set image", "phimg:set"),
+            _btn("\u274c Remove", "phimg:clear"),
+        ],
+        [_btn(f"\U0001f4cd Position ({ph.image_position})", "phimg:pos")],
+        [
+            _btn(f"\U0001f4a7 Opacity ({ph.image_opacity:.1f})", "phimg:opacity"),
+            _btn(f"\U0001f4cf Max H ({mh_label})", "phimg:maxh"),
+        ],
+        [_btn("\u25c0\ufe0f Placeholder", "ph:menu")],
+    ]
+    return rows
+
+
+def _kb_ph_video(cfg: Config):
+    ph = cfg.placeholder
+    mh = ph.video_max_height
+    mh_label = f"{mh}px" if mh > 0 else "full"
+    rows = [
+        [
+            _btn("\U0001f3ac Set video", "phvid:set"),
+            _btn("\u274c Remove", "phvid:clear"),
+        ],
+        [_btn(f"\U0001f4cd Position ({ph.video_position})", "phvid:pos")],
+        [
+            _btn(f"\U0001f4a7 Opacity ({ph.video_opacity:.1f})", "phvid:opacity"),
+            _btn(f"\U0001f4cf Max H ({mh_label})", "phvid:maxh"),
+        ],
+        [_btn("\u25c0\ufe0f Placeholder", "ph:menu")],
     ]
     return rows
 
@@ -1548,7 +1991,7 @@ def _kb_ph_text(cfg: Config):
             ),
         ],
         [
-            _btn(f"\U0001f4a7 Opacity ({ph.opacity:.1f})", "phtxt:opacity"),
+            _btn(f"\U0001f4a7 Opacity ({ph.text_opacity:.1f})", "phtxt:opacity"),
             _btn("\U0001f4c1 Font", "phtxt:font"),
         ],
         [_btn("\u25c0\ufe0f Placeholder", "ph:menu")],
@@ -1556,8 +1999,18 @@ def _kb_ph_text(cfg: Config):
     return rows
 
 
+_POSITION_BACK = {
+    "phpos":     "phtxt:menu",
+    "phimgpos":  "phimg:menu",
+    "phvidpos":  "phvid:menu",
+    "ovimgpos":  "ovimg:menu",
+    "ovtxtpos":  "ovtxt:menu",
+}
+
+
 def _kb_position(prefix: str):
-    """Position preset keyboard. prefix is 'phpos' or 'ovpos'."""
+    """Position preset keyboard. prefix is 'phpos', 'ovimgpos', or 'ovtxtpos'."""
+    back = _POSITION_BACK.get(prefix, "menu:main")
     return [
         [
             _btn("\u2196 TL", f"{prefix}:top-left"),
@@ -1575,7 +2028,7 @@ def _kb_position(prefix: str):
             _btn("\u2198 BR", f"{prefix}:bottom-right"),
         ],
         [_btn("\U0001f4d0 Custom x,y", f"{prefix}:custom")],
-        [_btn("\u25c0\ufe0f Back", f"{prefix.replace('pos', '')}txt:menu" if "pos" in prefix else "menu:main")],
+        [_btn("\u25c0\ufe0f Back", back)],
     ]
 
 
@@ -1589,14 +2042,32 @@ def _kb_ov(cfg: Config):
     return [
         [toggle],
         [
+            _btn("\U0001f5bc Image \u25b8", "ovimg:menu"),
             _btn("\U0001f4dd Text \u25b8", "ovtxt:menu"),
-            _btn("\U0001f5bc Image", "ov:image"),
-        ],
-        [
-            _btn(f"\U0001f4a7 Opacity ({ov.opacity:.1f})", "ov:opacity"),
         ],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
     ]
+
+
+def _kb_ov_image(cfg: Config):
+    ov = cfg.overlay
+    mh = ov.image_max_height
+    mh_label = f"{mh}px" if mh > 0 else "orig"
+    rows = [
+        [
+            _btn("\U0001f4f7 Set image", "ovimg:set"),
+            _btn("\u274c Clear", "ovimg:clear"),
+        ],
+        [
+            _btn(f"\U0001f4cd Position ({ov.image_position})", "ovimg:pos"),
+        ],
+        [
+            _btn(f"\U0001f4a7 Opacity ({ov.image_opacity:.1f})", "ovimg:opacity"),
+            _btn(f"\U0001f4cf Max H ({mh_label})", "ovimg:maxh"),
+        ],
+        [_btn("\u25c0\ufe0f Overlay", "ov:menu")],
+    ]
+    return rows
 
 
 def _kb_ov_text(cfg: Config):
@@ -1604,19 +2075,17 @@ def _kb_ov_text(cfg: Config):
     return [
         [
             _btn("\u270f\ufe0f Content", "ovtxt:content"),
+            _btn("\u274c Clear", "ovtxt:clear"),
         ],
         [
             _btn(f"\U0001f524 Size ({ov.font_size})", "ovtxt:size"),
             _btn(f"\U0001f3a8 Color ({ov.font_color})", "ovtxt:color"),
         ],
         [
-            _btn(
-                f"\U0001f4cd Position ({ov.position})",
-                "ovtxt:pos",
-            ),
+            _btn(f"\U0001f4cd Position ({ov.text_position})", "ovtxt:pos"),
         ],
         [
-            _btn(f"\U0001f4a7 Opacity ({ov.opacity:.1f})", "ovtxt:opacity"),
+            _btn(f"\U0001f4a7 Opacity ({ov.text_opacity:.1f})", "ovtxt:opacity"),
             _btn("\U0001f4c1 Font", "ovtxt:font"),
         ],
         [_btn("\u25c0\ufe0f Overlay", "ov:menu")],
