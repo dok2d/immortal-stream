@@ -95,12 +95,12 @@ class TelegramBot:
 
     async def _reload_compositor(self) -> None:
         """Reload compositor and persist state."""
-        await self._reload_compositor()
+        await self.manager.reload_compositor()
         self._save_state()
 
     async def _reload_output(self) -> None:
         """Reload output FFmpeg and persist state."""
-        await self._reload_output()
+        await self.manager.reload_output()
         self._save_state()
 
     # ------------------------------------------------------------------ #

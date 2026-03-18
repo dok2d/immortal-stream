@@ -90,9 +90,7 @@ async def main() -> None:
         sys.exit(1)
 
     # -- Restore saved runtime state (bot settings) -------------------------
-    state_path = STATE_PATH or os.path.join(
-        os.path.dirname(CONFIG_PATH), "state.yaml",
-    )
+    state_path = STATE_PATH or "/var/lib/immortal-stream/state.yaml"
     if load_state(cfg, state_path):
         log.info("Restored runtime state from %s", state_path)
 
