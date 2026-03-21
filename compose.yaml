@@ -16,6 +16,8 @@ services:
       - ./config.yaml:/etc/immortal-stream/config.yaml:ro
       # Media files: placeholder image/video, overlay image, fonts
       - ./media:/media:ro
+      # Recordings (writable)
+      - ./recordings:/media/recordings
 
     ports:
       # RTMP / RTSP ingest
