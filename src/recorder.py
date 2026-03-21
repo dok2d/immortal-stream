@@ -37,6 +37,7 @@ class SessionRecorder:
         self.notifier = notifier
         self._session_id: Optional[str] = None
         self._rec_proc: Optional[asyncio.subprocess.Process] = None
+        self._stderr_task: Optional[asyncio.Task] = None
         self._segments: List[str] = []
         self._part_num: int = 0
         self._monitor_task: Optional[asyncio.Task] = None
@@ -124,7 +125,7 @@ class SessionRecorder:
             "-f", "mpegts",
             seg_path,
         ]
-        log.info("Recording segment: %s", seg_path)
+        log.info("Recording cmd: %s", " ".join(cmd))
         try:
             self._rec_proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -137,11 +138,32 @@ class SessionRecorder:
             return
         self._segments.append(seg_path)
         self._segment_start = time.monotonic()
+        # Spawn stderr reader so pipe doesn't fill up and errors are logged
+        self._stderr_task = asyncio.create_task(
+            self._read_stderr(self._rec_proc), name="rec-stderr"
+        )
+
+    @staticmethod
+    async def _read_stderr(proc: asyncio.subprocess.Process) -> None:
+        """Drain stderr and log each line."""
+        assert proc.stderr is not None
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            log.warning("rec-ffmpeg: %s", line.decode(errors="replace").rstrip())
 
     async def _stop_ffmpeg(self) -> None:
         proc = self._rec_proc
-        if not proc or proc.returncode is not None:
+        if not proc:
+            return
+        if proc.returncode is not None:
+            # Already dead — log why
+            log.warning(
+                "Recording FFmpeg already exited (rc=%d)", proc.returncode
+            )
             self._rec_proc = None
+            self._cancel_stderr_task()
             return
         proc.terminate()
         try:
@@ -153,7 +175,13 @@ class SessionRecorder:
             except asyncio.TimeoutError:
                 pass
         self._rec_proc = None
+        self._cancel_stderr_task()
         log.info("Recording segment stopped")
+
+    def _cancel_stderr_task(self) -> None:
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            self._stderr_task = None
 
     # ------------------------------------------------------------------ #
     #  Finalization: concat segments → MP4 → send to Telegram             #
@@ -164,6 +192,19 @@ class SessionRecorder:
         # Filter to segments that actually exist and have content
         valid = [s for s in self._segments if os.path.isfile(s) and os.path.getsize(s) > 0]
         if not valid:
+            missing = [
+                s for s in self._segments if not os.path.isfile(s)
+            ]
+            empty = [
+                s for s in self._segments
+                if os.path.isfile(s) and os.path.getsize(s) == 0
+            ]
+            if missing:
+                log.warning("Segments missing (never created): %s", missing)
+            if empty:
+                log.warning("Segments empty (0 bytes): %s", empty)
+                for s in empty:
+                    self._try_remove(s)
             self._segments = []
             return
 
