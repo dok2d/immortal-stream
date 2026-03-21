@@ -101,20 +101,28 @@ def _border_opts(font_color: str) -> list:
 def _escape_drawtext(text: str) -> str:
     r"""Escape text for FFmpeg drawtext filter inside a filter_complex string.
 
-    Characters special to drawtext (\\, ', :) AND to the filter graph
-    parser (",", ;, [, ]) are all backslash-escaped so no quoting wrapper
-    is needed around the value.
+    The text passes through **two** levels of ``av_get_token`` parsing:
+
+      Level 1 — filter-graph parser  (separators: ``,`` ``;`` and label
+                markers ``[`` ``]``).
+      Level 2 — drawtext option parser  (separator: ``:``)
+
+    Level 1 strips *all* backslash escapes (``\X`` → ``X``) before
+    level 2 ever sees the string, so characters that are special at
+    level 2 (``:``, ``\``, ``'``) require **double** escaping while
+    characters special *only* at level 1 (``,`` ``;`` ``[`` ``]``)
+    need single escaping.
     """
+    _BS = "\\"
     return (
         text
-        .replace("\\", "\\\\")
-        .replace("'", "\\'")
-        .replace('"', '\\"')
-        .replace(":", "\\:")
-        .replace(";", "\\;")
-        .replace(",", "\\,")
-        .replace("[", "\\[")
-        .replace("]", "\\]")
+        .replace(_BS, _BS * 4)        # \ → \\\\  (L1→\\, L2→\)
+        .replace(":", _BS * 3 + ":")   # : → \\\:  (L1→\:, L2→literal :)
+        .replace("'", _BS * 3 + "'")   # ' → \\\'  (L1→\', L2→literal ')
+        .replace(";", _BS + ";")       # ; → \;    (L1 separator only)
+        .replace(",", _BS + ",")       # , → \,    (L1 separator only)
+        .replace("[", _BS + "[")       # [ → \[    (L1 label marker)
+        .replace("]", _BS + "]")       # ] → \]    (L1 label marker)
     )
 
 

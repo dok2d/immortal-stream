@@ -18,7 +18,9 @@ if [ ! -f "$CONFIG_PATH" ]; then
     exit 1
 fi
 
-# Fix ownership on bind-mounted paths so streamer (uid 1000) can write.
+# Ensure required directories exist and fix ownership on bind-mounted
+# paths so streamer (uid 1000) can write.
+mkdir -p /media/opt/.cache /media/records
 chown streamer:streamer "$CONFIG_PATH" 2>/dev/null || true
 chown -R streamer:streamer /media 2>/dev/null || true
 
