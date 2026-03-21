@@ -102,7 +102,7 @@ def _escape_drawtext(text: str) -> str:
     r"""Escape text for FFmpeg drawtext filter inside a filter_complex string.
 
     Characters special to drawtext (\\, ', :) AND to the filter graph
-    parser (", ;, [, ]) are all backslash-escaped so no quoting wrapper
+    parser (",", ;, [, ]) are all backslash-escaped so no quoting wrapper
     is needed around the value.
     """
     return (
@@ -112,6 +112,7 @@ def _escape_drawtext(text: str) -> str:
         .replace('"', '\\"')
         .replace(":", "\\:")
         .replace(";", "\\;")
+        .replace(",", "\\,")
         .replace("[", "\\[")
         .replace("]", "\\]")
     )
