@@ -50,8 +50,8 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # ── Directories ───────────────────────────────────────────────────────────────
-RUN mkdir -p /etc/immortal-stream /media /tmp/immortal-stream \
-    && chown -R streamer:streamer /tmp/immortal-stream
+RUN mkdir -p /etc/immortal-stream /media /media/recordings /tmp/immortal-stream \
+    && chown -R streamer:streamer /tmp/immortal-stream /media/recordings
 
 # ── Security ──────────────────────────────────────────────────────────────────
 USER streamer

@@ -16,7 +16,7 @@ services:
       - ./config.yaml:/etc/immortal-stream/config.yaml:ro
       # Media files: placeholder image/video, overlay image, fonts
       - ./media:/media:ro
-      # Recordings (writable)
+      # Recordings (writable by uid 1000 — run: mkdir -p recordings && chown 1000:1000 recordings)
       - ./recordings:/media/recordings
 
     ports:

@@ -57,12 +57,27 @@ class SessionRecorder:
         if not self.cfg.recording.enabled:
             return
         async with self._lock:
+            rec_dir = self.cfg.recording.directory
+            os.makedirs(rec_dir, exist_ok=True)
+            # Verify write permissions
+            test_file = os.path.join(rec_dir, ".write_test")
+            try:
+                with open(test_file, "w") as f:
+                    f.write("ok")
+                os.unlink(test_file)
+            except OSError as e:
+                log.error("Recording directory not writable: %s — %s", rec_dir, e)
+                self.notifier.send(
+                    f"\u26a0\ufe0f <b>Recording disabled</b>: "
+                    f"directory not writable\n"
+                    f"<code>{rec_dir}</code>\n{e}"
+                )
+                return
             self._session_id = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             self._segments = []
             self._part_num = 0
             self._disk_full = False
             self._session_start = time.monotonic()
-            os.makedirs(self.cfg.recording.directory, exist_ok=True)
             self._monitor_task = asyncio.create_task(
                 self._monitor_loop(), name="rec-monitor"
             )
