@@ -377,8 +377,9 @@ def save_config(cfg: Config, path: str) -> None:
     """Merge bot-modifiable settings into config.yaml and write back.
 
     Reads the original file, updates only the sections the bot can change
-    (placeholder, overlay, output, recording), and writes atomically
-    (tmp + rename) to prevent corruption on crash.
+    (placeholder, overlay, output, recording), and writes back in place.
+    Uses a temp file + rename when possible, falls back to direct write
+    for bind-mounted files where creating siblings is not allowed.
     """
     try:
         with open(path) as f:
@@ -399,15 +400,21 @@ def save_config(cfg: Config, path: str) -> None:
     }
     data["recording"] = asdict(cfg.recording)
 
+    content = yaml.safe_dump(data, default_flow_style=False, allow_unicode=True)
+
+    # Try atomic write (tmp + rename) first; fall back to direct write
+    # for Docker/Podman file bind mounts where sibling creation fails.
     tmp = path + ".tmp"
     try:
         with open(tmp, "w") as f:
-            yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True)
+            f.write(content)
         os.replace(tmp, path)
-        log.debug("Config saved to %s", path)
-    except Exception:
-        log.exception("Failed to save config to %s", path)
+    except OSError:
         try:
             os.unlink(tmp)
         except OSError:
             pass
+        with open(path, "w") as f:
+            f.write(content)
+
+    log.debug("Config saved to %s", path)
