@@ -402,19 +402,24 @@ def save_config(cfg: Config, path: str) -> None:
 
     content = yaml.safe_dump(data, default_flow_style=False, allow_unicode=True)
 
-    # Try atomic write (tmp + rename) first; fall back to direct write
-    # for Docker/Podman file bind mounts where sibling creation fails.
+    # Write to a temp file first, then move into place.
+    # Use the same directory as the target so os.replace stays on the
+    # same filesystem (avoids cross-device errors with /tmp).
     tmp = path + ".tmp"
     try:
         with open(tmp, "w") as f:
             f.write(content)
         os.replace(tmp, path)
+        log.debug("Config saved to %s (atomic)", path)
+        return
     except OSError:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-        with open(path, "w") as f:
-            f.write(content)
 
-    log.debug("Config saved to %s", path)
+    # Fallback: direct write (e.g. bind-mounted file where directory
+    # is not writable but the file itself is).
+    with open(path, "w") as f:
+        f.write(content)
+    log.debug("Config saved to %s (direct)", path)

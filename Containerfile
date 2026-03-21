@@ -17,6 +17,7 @@ RUN apk add --no-cache \
         tzdata \
         fontconfig \
         unzip \
+        su-exec \
     && rm -rf /var/cache/apk/*
 
 # ── JetBrains Mono font (supports Latin, Cyrillic, Greek) ────────────────────
@@ -53,8 +54,9 @@ RUN chmod +x /entrypoint.sh
 RUN mkdir -p /etc/immortal-stream /media /media/recordings /tmp/immortal-stream \
     && chown -R streamer:streamer /tmp/immortal-stream /media/recordings
 
-# ── Security ──────────────────────────────────────────────────────────────────
-USER streamer
+# ── Runtime ──────────────────────────────────────────────────────────────────
+# Entrypoint runs as root to fix bind-mount permissions,
+# then drops to streamer via su-exec.
 WORKDIR /app
 
 # RTMP ingest (external)
