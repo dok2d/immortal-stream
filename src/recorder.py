@@ -39,6 +39,7 @@ class SessionRecorder:
         self._rec_proc: Optional[asyncio.subprocess.Process] = None
         self._stderr_task: Optional[asyncio.Task] = None
         self._segments: List[str] = []
+        self._seg_counter: int = 0
         self._part_num: int = 0
         self._monitor_task: Optional[asyncio.Task] = None
         self._disk_full: bool = False
@@ -75,6 +76,7 @@ class SessionRecorder:
                 return
             self._session_id = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             self._segments = []
+            self._seg_counter = 0
             self._part_num = 0
             self._disk_full = False
             self._session_start = time.monotonic()
@@ -108,6 +110,10 @@ class SessionRecorder:
         if self._disk_full:
             log.warning("Recording skipped: disk full")
             return
+        # Wait briefly for the RTSP source to fully establish video
+        # track (SPS/PPS keyframes).  Without this, the recorder may
+        # connect before video is available, producing audio-only files.
+        await asyncio.sleep(3)
         async with self._lock:
             rtsp_url = (
                 f"rtsp://127.0.0.1:{self.cfg.internal_rtsp_port}/{info.path}"
@@ -127,14 +133,19 @@ class SessionRecorder:
     async def _start_ffmpeg(self, rtsp_url: str) -> None:
         if self._rec_proc and self._rec_proc.returncode is None:
             return  # already recording
-        seg_num = len(self._segments) + 1
+        self._seg_counter += 1
         seg_path = os.path.join(
             self.cfg.recording.directory,
-            f"{self._session_id}_seg{seg_num:03d}.ts",
+            f"{self._session_id}_seg{self._seg_counter:03d}.ts",
         )
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats",
             "-rtsp_transport", "tcp",
+            # Give ffmpeg enough time to detect all tracks (especially
+            # video) before it starts writing.  Prevents audio-only
+            # recordings when connecting right as the stream appears.
+            "-analyzeduration", "10000000",
+            "-probesize", "10000000",
             "-i", rtsp_url,
             "-c", "copy",
             "-f", "mpegts",
