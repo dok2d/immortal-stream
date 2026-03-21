@@ -21,7 +21,7 @@ import re
 import urllib.request
 from typing import Callable, Optional, TYPE_CHECKING
 
-from config import Config, _X264_PRESETS, POSITION_PRESETS, save_state
+from config import Config, _X264_PRESETS, POSITION_PRESETS, save_config
 
 if TYPE_CHECKING:
     from stream_manager import StreamManager
@@ -45,11 +45,11 @@ class TelegramBot:
         self,
         cfg: Config,
         manager: "StreamManager",
-        state_path: str = "",
+        config_path: str = "",
     ):
         self.cfg = cfg
         self.manager = manager
-        self._state_path = state_path
+        self._config_path = config_path
         self._base = f"https://api.telegram.org/bot{cfg.telegram.bot_token}"
         self._chat_id = cfg.telegram.chat_id
         self._running = False
@@ -81,13 +81,13 @@ class TelegramBot:
             log.error("Bot poll loop crashed: %s", exc)
 
     # ------------------------------------------------------------------ #
-    #  State persistence helpers                                           #
+    #  Config persistence helpers                                          #
     # ------------------------------------------------------------------ #
 
     def _save_state(self) -> None:
-        """Persist current config to state file (if configured)."""
-        if self._state_path:
-            save_state(self.cfg, self._state_path)
+        """Persist bot-modifiable settings back to config.yaml."""
+        if self._config_path:
+            save_config(self.cfg, self._config_path)
 
     async def _save_state_async(self) -> None:
         """Async wrapper for _save_state (used as reload_fn callback)."""
@@ -252,10 +252,16 @@ class TelegramBot:
                 except Exception:
                     # Message unchanged (same text) — ignore
                     pass
-            await self._answer_cb(cb_id, toast or "")
+            try:
+                await self._answer_cb(cb_id, toast or "")
+            except Exception:
+                log.debug("answerCallbackQuery expired")
         except Exception as e:
             log.exception("Callback error")
-            await self._answer_cb(cb_id, f"Error: {e}")
+            try:
+                await self._answer_cb(cb_id, f"Error: {e}")
+            except Exception:
+                log.debug("answerCallbackQuery expired (error path)")
 
     async def _route_callback(self, data: str):
         """Dispatch callback data → (text, keyboard, toast)."""
@@ -278,6 +284,7 @@ class TelegramBot:
             "ovtxtpos": self._cb_ov_txt_pos,
             "target": self._cb_target,
             "out":    self._cb_output,
+            "rec":    self._cb_recording,
             "power":  self._cb_power,
         }
         handler = handlers.get(section)
@@ -893,6 +900,27 @@ class TelegramBot:
                 )
 
         return self._text_output(), _kb_out(self.cfg), ""
+
+    # -- Recording ---------------------------------------------------------
+
+    async def _cb_recording(self, p):
+        act = p[1] if len(p) > 1 else "menu"
+
+        if act == "menu":
+            return self._text_recording(), _kb_recording(self.cfg), ""
+
+        if act == "toggle":
+            new_state = not self.cfg.recording.enabled
+            await self.manager.set_recording_enabled(new_state)
+            self._save_state()
+            label = "ON" if new_state else "OFF"
+            return (
+                self._text_recording(),
+                _kb_recording(self.cfg),
+                f"Recording {label}",
+            )
+
+        return self._text_recording(), _kb_recording(self.cfg), ""
 
     # -- Power -------------------------------------------------------------
 
@@ -1869,6 +1897,23 @@ class TelegramBot:
             f"  Audio: {a.bitrate} / {a.sample_rate}Hz"
         )
 
+    def _text_recording(self) -> str:
+        r = self.cfg.recording
+        status = "\u2705 ON" if r.enabled else "\u274c OFF"
+        lines = [
+            f"<b>Recording:</b> {status}",
+            f"  Directory: <code>{r.directory}</code>",
+            f"  Max file: {r.max_file_size_mb} MB",
+        ]
+        try:
+            import shutil as _shutil
+            usage = _shutil.disk_usage(r.directory)
+            free_gb = usage.free / (1024 ** 3)
+            lines.append(f"  Disk free: {free_gb:.1f} GB")
+        except OSError:
+            lines.append("  Disk free: N/A")
+        return "\n".join(lines)
+
     def _text_power(self) -> str:
         if self.manager.is_paused:
             return (
@@ -1900,6 +1945,9 @@ _KB_MAIN = [
     ],
     [
         _btn("\u2699\ufe0f Output", "out:menu"),
+        _btn("\u23fa Recording", "rec:menu"),
+    ],
+    [
         _btn("\u26a1 Power", "power:menu"),
     ],
 ]
@@ -2112,6 +2160,14 @@ def _kb_out(cfg: Config):
             _btn(f"\U0001f4d0 Size ({v.width}\u00d7{v.height})", "out:size"),
             _btn(f"\u2699\ufe0f Preset ({v.preset})", "out:preset"),
         ],
+        [_btn("\u25c0\ufe0f Menu", "menu:main")],
+    ]
+
+
+def _kb_recording(cfg: Config):
+    label = "\u23f9 Disable recording" if cfg.recording.enabled else "\u23fa Enable recording"
+    return [
+        [_btn(label, "rec:toggle")],
         [_btn("\u25c0\ufe0f Menu", "menu:main")],
     ]
 

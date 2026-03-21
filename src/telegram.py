@@ -2,7 +2,9 @@
 import asyncio
 import json
 import logging
+import os
 import time
+import uuid
 from typing import Optional
 from urllib.error import URLError
 from urllib.parse import urlencode
@@ -113,6 +115,62 @@ class TelegramNotifier:
             if not result.get("ok"):
                 raise RuntimeError(f"Telegram API error: {result}")
 
+    def _post_document(self, file_path: str, caption: str) -> bool:
+        """Synchronous multipart upload to Telegram sendDocument API."""
+        url = f"{self._base}/sendDocument"
+        boundary = uuid.uuid4().hex
+        filename = os.path.basename(file_path)
+
+        parts = []
+        # chat_id field
+        parts.append(
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n"
+            f"{self.chat_id}\r\n"
+        )
+        # caption field
+        if caption:
+            parts.append(
+                f"--{boundary}\r\n"
+                f"Content-Disposition: form-data; name=\"caption\"\r\n\r\n"
+                f"{caption}\r\n"
+            )
+        # file header
+        file_header = (
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"document\"; "
+            f"filename=\"{filename}\"\r\n"
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        )
+        file_footer = f"\r\n--{boundary}--\r\n"
+
+        # Build body: text parts + file content + footer
+        prefix = "".join(parts).encode() + file_header.encode()
+        suffix = file_footer.encode()
+
+        with open(file_path, "rb") as f:
+            body = prefix + f.read() + suffix
+
+        req = Request(url, data=body, method="POST")
+        req.add_header(
+            "Content-Type", f"multipart/form-data; boundary={boundary}"
+        )
+        with urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read())
+            if not result.get("ok"):
+                raise RuntimeError(f"Telegram API error: {result}")
+        return True
+
+    async def send_document(self, file_path: str, caption: str = "") -> bool:
+        """Upload a file to the chat. Returns True on success."""
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, self._post_document, file_path, caption,
+            )
+        except Exception as e:
+            log.error("Telegram send_document failed: %s", e)
+            return False
+
 
 class NoopNotifier:
     """Stub notifier used when Telegram is disabled."""
@@ -125,3 +183,7 @@ class NoopNotifier:
 
     def send(self, text: str) -> None:
         log.info("[NOTIFY] %s", text)
+
+    async def send_document(self, file_path: str, caption: str = "") -> bool:
+        log.info("[NOTIFY] send_document %s: %s", file_path, caption)
+        return False
