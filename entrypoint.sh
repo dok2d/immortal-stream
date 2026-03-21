@@ -1,6 +1,5 @@
 #!/bin/sh
 # immortal-stream entrypoint
-# Runs as root to fix bind-mount permissions, then drops to streamer.
 set -e
 
 CONFIG_PATH="${CONFIG_PATH:-/etc/immortal-stream/config.yaml}"

@@ -36,6 +36,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
+      - FOWNER
     read_only: false   # /tmp is needed for mediamtx config
     tmpfs:
       - /tmp:size=64m
