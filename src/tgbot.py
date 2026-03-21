@@ -252,10 +252,16 @@ class TelegramBot:
                 except Exception:
                     # Message unchanged (same text) — ignore
                     pass
-            await self._answer_cb(cb_id, toast or "")
+            try:
+                await self._answer_cb(cb_id, toast or "")
+            except Exception:
+                log.debug("answerCallbackQuery expired")
         except Exception as e:
             log.exception("Callback error")
-            await self._answer_cb(cb_id, f"Error: {e}")
+            try:
+                await self._answer_cb(cb_id, f"Error: {e}")
+            except Exception:
+                log.debug("answerCallbackQuery expired (error path)")
 
     async def _route_callback(self, data: str):
         """Dispatch callback data → (text, keyboard, toast)."""
