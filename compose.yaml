@@ -12,8 +12,8 @@ services:
     restart: unless-stopped
 
     volumes:
-      # Config file (required)
-      - ./config.yaml:/etc/immortal-stream/config.yaml:ro
+      # Config file (required, writable — bot persists changes here)
+      - ./config.yaml:/etc/immortal-stream/config.yaml
       # Media files: placeholder image/video, overlay image, fonts
       - ./media:/media:ro
       # Recordings (writable by uid 1000 — run: mkdir -p recordings && chown 1000:1000 recordings)

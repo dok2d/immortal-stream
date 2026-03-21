@@ -21,7 +21,7 @@ import re
 import urllib.request
 from typing import Callable, Optional, TYPE_CHECKING
 
-from config import Config, _X264_PRESETS, POSITION_PRESETS, save_state
+from config import Config, _X264_PRESETS, POSITION_PRESETS, save_config
 
 if TYPE_CHECKING:
     from stream_manager import StreamManager
@@ -45,11 +45,11 @@ class TelegramBot:
         self,
         cfg: Config,
         manager: "StreamManager",
-        state_path: str = "",
+        config_path: str = "",
     ):
         self.cfg = cfg
         self.manager = manager
-        self._state_path = state_path
+        self._config_path = config_path
         self._base = f"https://api.telegram.org/bot{cfg.telegram.bot_token}"
         self._chat_id = cfg.telegram.chat_id
         self._running = False
@@ -81,13 +81,13 @@ class TelegramBot:
             log.error("Bot poll loop crashed: %s", exc)
 
     # ------------------------------------------------------------------ #
-    #  State persistence helpers                                           #
+    #  Config persistence helpers                                          #
     # ------------------------------------------------------------------ #
 
     def _save_state(self) -> None:
-        """Persist current config to state file (if configured)."""
-        if self._state_path:
-            save_state(self.cfg, self._state_path)
+        """Persist bot-modifiable settings back to config.yaml."""
+        if self._config_path:
+            save_config(self.cfg, self._config_path)
 
     async def _save_state_async(self) -> None:
         """Async wrapper for _save_state (used as reload_fn callback)."""

@@ -369,100 +369,45 @@ def load_config(path: str) -> Config:
 
 
 # ---------------------------------------------------------------------------
-#  Runtime state persistence
+#  Config persistence — write bot-modifiable settings back to config.yaml
 # ---------------------------------------------------------------------------
 
-# Sections saved to state file — only bot-modifiable settings.
-_STATE_SECTIONS = ("placeholder", "overlay", "output", "recording")
 
+def save_config(cfg: Config, path: str) -> None:
+    """Merge bot-modifiable settings into config.yaml and write back.
 
-def save_state(cfg: Config, path: str) -> None:
-    """Persist bot-modifiable settings to a YAML state file.
-
-    Writes atomically (tmp + rename) to prevent corruption on crash.
-    Only saves sections the bot can change: placeholder, overlay, output.
+    Reads the original file, updates only the sections the bot can change
+    (placeholder, overlay, output, recording), and writes atomically
+    (tmp + rename) to prevent corruption on crash.
     """
-    state: dict = {}
-    state["placeholder"] = asdict(cfg.placeholder)
-    state["overlay"] = asdict(cfg.overlay)
-    state["output"] = {
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        log.warning("Cannot read %s for merging — writing from scratch", path)
+        data = {}
+
+    data["placeholder"] = asdict(cfg.placeholder)
+    data["overlay"] = asdict(cfg.overlay)
+    data["output"] = {
         "targets": list(cfg.output.targets),
         "video": asdict(cfg.output.video),
+        # preserve audio from original config
+        **({"audio": data["output"]["audio"]}
+           if "output" in data and "audio" in data.get("output", {})
+           else {}),
     }
-    state["recording"] = asdict(cfg.recording)
+    data["recording"] = asdict(cfg.recording)
 
     tmp = path + ".tmp"
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(tmp, "w") as f:
-            yaml.safe_dump(state, f, default_flow_style=False, allow_unicode=True)
+            yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True)
         os.replace(tmp, path)
+        log.debug("Config saved to %s", path)
     except Exception:
-        log.exception("Failed to save state to %s", path)
+        log.exception("Failed to save config to %s", path)
         try:
             os.unlink(tmp)
         except OSError:
             pass
-
-
-def load_state(cfg: Config, path: str) -> bool:
-    """Restore bot-modifiable settings from a saved state file.
-
-    Merges saved values on top of the already-loaded base config.
-    Returns True if state was loaded, False if no state file exists.
-    Silently ignores corrupt or unreadable state files.
-    """
-    if not os.path.isfile(path):
-        return False
-
-    try:
-        with open(path) as f:
-            data = yaml.safe_load(f)
-        if not isinstance(data, dict):
-            return False
-    except Exception:
-        log.warning("Failed to read state file %s — ignoring", path)
-        return False
-
-    log.info("Restoring saved state from %s", path)
-
-    if "placeholder" in data and isinstance(data["placeholder"], dict):
-        p = data["placeholder"]
-        _migrate_placeholder(p)
-        # Validate file existence — skip missing files
-        img = p.get("image_path")
-        if img and not os.path.isfile(img):
-            log.warning("State placeholder.image_path %r missing — ignoring", img)
-            p.pop("image_path")
-        vid = p.get("video_path")
-        if vid and not os.path.isfile(vid):
-            log.warning("State placeholder.video_path %r missing — ignoring", vid)
-            p.pop("video_path")
-        cfg.placeholder = _populate(PlaceholderConfig, p)
-
-    if "overlay" in data and isinstance(data["overlay"], dict):
-        o = data["overlay"]
-        if "image_opacity" in o:
-            o["image_opacity"] = float(o["image_opacity"])
-        if "text_opacity" in o:
-            o["text_opacity"] = float(o["text_opacity"])
-        ov_path = o.get("path")
-        if ov_path and not os.path.isfile(ov_path):
-            log.warning(
-                "State overlay.path %r no longer exists — "
-                "falling back to base config overlay", ov_path,
-            )
-        else:
-            cfg.overlay = _populate(OverlayConfig, o)
-
-    if "output" in data and isinstance(data["output"], dict):
-        od = data["output"]
-        if "targets" in od and isinstance(od["targets"], list):
-            cfg.output.targets = od["targets"]
-        if "video" in od and isinstance(od["video"], dict):
-            cfg.output.video = _populate(VideoConfig, od["video"])
-
-    if "recording" in data and isinstance(data["recording"], dict):
-        cfg.recording = _populate(RecordingConfig, data["recording"])
-
-    return True
