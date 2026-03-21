@@ -120,7 +120,7 @@ class OutputConfig:
 @dataclass
 class RecordingConfig:
     enabled: bool = False
-    directory: str = "/tmp/immortal-stream/recordings"
+    directory: str = "/media/recordings"
     max_file_size_mb: int = 45
     min_disk_free_mb: int = 1000
     min_disk_stop_mb: int = 100
