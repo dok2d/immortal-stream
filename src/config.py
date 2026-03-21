@@ -118,6 +118,15 @@ class OutputConfig:
 
 
 @dataclass
+class RecordingConfig:
+    enabled: bool = False
+    directory: str = "/tmp/immortal-stream/recordings"
+    max_file_size_mb: int = 45
+    min_disk_free_mb: int = 1000
+    min_disk_stop_mb: int = 100
+
+
+@dataclass
 class TelegramConfig:
     enabled: bool = False
     bot_token: str = ""
@@ -131,6 +140,7 @@ class Config:
     placeholder: PlaceholderConfig = field(default_factory=PlaceholderConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    recording: RecordingConfig = field(default_factory=RecordingConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     # Internal — generated at runtime, not user-configurable
     internal_rtsp_port: int = 8554
@@ -344,6 +354,9 @@ def load_config(path: str) -> Config:
             audio=_populate(AudioConfig, od.get("audio", {})),
         )
 
+    if "recording" in data:
+        cfg.recording = _populate(RecordingConfig, data["recording"])
+
     if "telegram" in data:
         t = data["telegram"]
         # chat_id is always stored as string
@@ -360,7 +373,7 @@ def load_config(path: str) -> Config:
 # ---------------------------------------------------------------------------
 
 # Sections saved to state file — only bot-modifiable settings.
-_STATE_SECTIONS = ("placeholder", "overlay", "output")
+_STATE_SECTIONS = ("placeholder", "overlay", "output", "recording")
 
 
 def save_state(cfg: Config, path: str) -> None:
@@ -376,6 +389,7 @@ def save_state(cfg: Config, path: str) -> None:
         "targets": list(cfg.output.targets),
         "video": asdict(cfg.output.video),
     }
+    state["recording"] = asdict(cfg.recording)
 
     tmp = path + ".tmp"
     try:
@@ -447,5 +461,8 @@ def load_state(cfg: Config, path: str) -> bool:
             cfg.output.targets = od["targets"]
         if "video" in od and isinstance(od["video"], dict):
             cfg.output.video = _populate(VideoConfig, od["video"])
+
+    if "recording" in data and isinstance(data["recording"], dict):
+        cfg.recording = _populate(RecordingConfig, data["recording"])
 
     return True

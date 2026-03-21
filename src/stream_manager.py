@@ -38,6 +38,7 @@ from ffmpeg_cmd import (
     build_compositor_idle, build_compositor_live, build_compositor_audio_only,
     build_output, file_has_audio, prepare_image,
 )
+from recorder import SessionRecorder
 
 log = logging.getLogger("stream_manager")
 
@@ -78,6 +79,7 @@ class StreamManager:
         # Managed background tasks (stored to prevent GC and catch exceptions)
         self._tasks: List[asyncio.Task] = []
         self._hook_server: Optional[asyncio.Server] = None
+        self._recorder = SessionRecorder(cfg, notifier)
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -97,9 +99,17 @@ class StreamManager:
         await self._start_hook_server()
         self._spawn_task(self._event_worker(), "event-worker")
         self._spawn_task(self._watchdog(), "watchdog")
+        try:
+            await self._recorder.on_session_start()
+        except Exception:
+            log.error("Recorder session start failed", exc_info=True)
 
     async def stop(self) -> None:
         self._running = False
+        try:
+            await self._recorder.on_session_end()
+        except Exception:
+            log.error("Recorder session end failed", exc_info=True)
         if self._hook_server:
             self._hook_server.close()
             await self._hook_server.wait_closed()
@@ -122,6 +132,10 @@ class StreamManager:
         The service enters a fully stopped state.  Use resume_all() to
         restart everything.
         """
+        try:
+            await self._recorder.on_session_end()
+        except Exception:
+            log.error("Recorder session end failed", exc_info=True)
         self._running = False
         for task in self._tasks:
             task.cancel()
@@ -144,6 +158,10 @@ class StreamManager:
         self._spawn_task(self._event_worker(), "event-worker")
         self._spawn_task(self._watchdog(), "watchdog")
         log.info("All processes resumed")
+        try:
+            await self._recorder.on_session_start()
+        except Exception:
+            log.error("Recorder session start failed", exc_info=True)
 
     def _spawn_task(self, coro, name: str) -> asyncio.Task:
         """Create a tracked background task with exception logging."""
@@ -366,6 +384,11 @@ class StreamManager:
             else:
                 await self._start_compositor_live(info)
 
+            try:
+                await self._recorder.on_stream_live(info)
+            except Exception:
+                log.error("Recorder on_stream_live failed", exc_info=True)
+
             if old_stream:
                 self._notify_preemption(old_stream, info, remote_addr, conn_type)
             else:
@@ -388,6 +411,11 @@ class StreamManager:
             duration = int(time.monotonic() - info.started_at)
             log.info("Stream stopped: path=%s duration=%ds", path, duration)
 
+            try:
+                await self._recorder.on_stream_idle()
+            except Exception:
+                log.error("Recorder on_stream_idle failed", exc_info=True)
+
             # Try to fail over to the next best available stream
             next_path = self._select_best_stream()
             if next_path and next_path in self._active_streams:
@@ -397,6 +425,11 @@ class StreamManager:
                     await self._start_compositor_audio_only(next_info)
                 else:
                     await self._start_compositor_live(next_info)
+                try:
+                    await self._recorder.on_stream_live(next_info)
+                except Exception:
+                    log.error("Recorder on_stream_live (failover) failed",
+                              exc_info=True)
                 log.info(
                     "Failover: %s -> %s (was active %ds)",
                     path, next_path, duration,
@@ -514,6 +547,19 @@ class StreamManager:
                     await self._start_compositor_live(info)
             else:
                 await self._start_compositor_idle()
+
+    async def set_recording_enabled(self, enabled: bool) -> None:
+        """Toggle recording on/off. Starts/stops recorder accordingly."""
+        self.cfg.recording.enabled = enabled
+        try:
+            if enabled and self._running:
+                await self._recorder.on_session_start()
+                if self._current_stream:
+                    await self._recorder.on_stream_live(self._current_stream)
+            elif not enabled:
+                await self._recorder.on_session_end()
+        except Exception:
+            log.error("Recorder toggle failed", exc_info=True)
 
     async def reload_output(self) -> None:
         """Restart output FFmpeg (targets changed). Briefly interrupts connection."""
