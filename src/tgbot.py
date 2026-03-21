@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("tgbot")
 
 POLL_TIMEOUT = 30
-MEDIA_DIR = "/tmp/tgbot_media"
+MEDIA_DIR = "/media/opt"
 
 # File-size limits for Telegram Bot API downloads (in bytes).
 _MAX_PHOTO = 20 * 1024 * 1024      # 20 MB

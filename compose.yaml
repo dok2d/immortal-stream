@@ -14,10 +14,10 @@ services:
     volumes:
       # Config file (required, writable — bot persists changes here)
       - ./config.yaml:/etc/immortal-stream/config.yaml
-      # Media files: placeholder image/video, overlay image, fonts
-      - ./media:/media:ro
-      # Recordings (writable by uid 1000 — run: mkdir -p recordings && chown 1000:1000 recordings)
-      - ./recordings:/media/recordings
+      # Media directory (writable — bot downloads, image cache, recordings)
+      #   media/opt/      — user media files (placeholder, overlay, fonts, bot downloads)
+      #   media/records/  — stream recordings
+      - ./media:/media
 
     ports:
       # RTMP / RTSP ingest

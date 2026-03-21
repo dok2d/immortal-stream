@@ -10,7 +10,7 @@ DEFAULT_FONT = "/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
 # Persistent across restarts; controlled by CACHE_DIR env var.
 import os as _os
 _OVERLAY_CACHE_DIR = _os.environ.get(
-    "CACHE_DIR", "/tmp/immortal-stream/cache"
+    "CACHE_DIR", "/media/opt/.cache"
 )
 
 

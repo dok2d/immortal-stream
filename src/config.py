@@ -120,7 +120,7 @@ class OutputConfig:
 @dataclass
 class RecordingConfig:
     enabled: bool = False
-    directory: str = "/media/recordings"
+    directory: str = "/media/records"
     max_file_size_mb: int = 45
     min_disk_free_mb: int = 1000
     min_disk_stop_mb: int = 100
@@ -243,25 +243,37 @@ def _validate(cfg: Config) -> None:
         log.warning("Unknown log_level %r, falling back to INFO", cfg.log_level)
         cfg.log_level = "INFO"
 
-    # Validate placeholder/overlay file existence
+    # Validate placeholder/overlay file existence — warn and clear missing
+    # files instead of crashing (files from previous sessions may be gone).
     if ph.image_path and not os.path.isfile(ph.image_path):
-        raise ValueError(
-            f"placeholder.image_path {ph.image_path!r} does not exist"
+        log.warning(
+            "placeholder.image_path %r does not exist — clearing",
+            ph.image_path,
         )
+        ph.image_path = None
     if ph.video_path and not os.path.isfile(ph.video_path):
-        raise ValueError(
-            f"placeholder.video_path {ph.video_path!r} does not exist"
+        log.warning(
+            "placeholder.video_path %r does not exist — clearing",
+            ph.video_path,
         )
-    if ov.enabled and ov.path and not os.path.isfile(ov.path):
-        raise ValueError(f"overlay.path {ov.path!r} does not exist")
+        ph.video_path = None
+    if ov.path and not os.path.isfile(ov.path):
+        log.warning("overlay.path %r does not exist — clearing", ov.path)
+        ov.path = None
 
     # Validate font files
-    for label, font_path in [
-        ("placeholder.font_path", ph.font_path),
-        ("overlay.font_path", ov.font_path),
-    ]:
-        if font_path and not os.path.isfile(font_path):
-            raise ValueError(f"{label} {font_path!r} does not exist")
+    if ph.font_path and not os.path.isfile(ph.font_path):
+        log.warning(
+            "placeholder.font_path %r does not exist — clearing",
+            ph.font_path,
+        )
+        ph.font_path = None
+    if ov.font_path and not os.path.isfile(ov.font_path):
+        log.warning(
+            "overlay.font_path %r does not exist — clearing",
+            ov.font_path,
+        )
+        ov.font_path = None
 
 
 # ---------------------------------------------------------------------------
