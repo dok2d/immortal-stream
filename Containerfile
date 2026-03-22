@@ -1,7 +1,7 @@
 # immortal-stream — fault-tolerant live streaming container
 # Build: podman build -t immortal-stream .
-# Run:   podman run --rm -v ./config.yaml:/etc/immortal-stream/config.yaml:ro \
-#                        -v ./media:/media:ro \
+# Run:   podman run --rm -v ./config.yaml:/etc/immortal-stream/config.yaml \
+#                        -v ./media:/media \
 #                        -p 1935:1935 -p 8890:8890/udp \
 #                        immortal-stream
 
@@ -51,8 +51,8 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # ── Directories ───────────────────────────────────────────────────────────────
-RUN mkdir -p /etc/immortal-stream /media /media/recordings /tmp/immortal-stream \
-    && chown -R streamer:streamer /tmp/immortal-stream /media/recordings
+RUN mkdir -p /etc/immortal-stream /media/opt/.cache /media/records \
+    && chown -R streamer:streamer /media
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 # Entrypoint runs as root to fix bind-mount permissions,

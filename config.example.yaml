@@ -74,17 +74,17 @@ placeholder:
 
   # ── Image layer (overlaid on background) ─────────────────────────
   # Set via Telegram bot or /placeholder image <path>
-  # image_path: /media/placeholder.jpg
+  # image_path: /media/opt/placeholder.jpg
   # image_opacity: 1.0                        # 0.0 (transparent) … 1.0 (opaque)
 
   # ── Video layer (overlaid on image) ──────────────────────────────
   # Loops indefinitely. Audio from this video is used if available.
-  # video_path: /media/placeholder.mp4
+  # video_path: /media/opt/placeholder.mp4
 
   # ── Text layer (overlaid on everything) ──────────────────────────
   # Set via Telegram bot or /placeholder text <text>
   # text: "Трансляция скоро начнётся"
-  # font_path: /media/fonts/MyFont.ttf        # TTF/OTF font; JetBrains Mono used if omitted
+  # font_path: /media/opt/MyFont.ttf          # TTF/OTF font; JetBrains Mono used if omitted
   # font_size: 72
   # font_color: white                         # FFmpeg color name or #RRGGBB
   # text_position: center                     # preset name or "custom"
@@ -104,13 +104,13 @@ overlay:
 
   # ── Text overlay ───────────────────────────────────────────────────
   text: "LIVE"
-  # font_path: /media/fonts/MyFont.ttf        # TTF/OTF font; JetBrains Mono used if omitted
+  # font_path: /media/opt/MyFont.ttf           # TTF/OTF font; JetBrains Mono used if omitted
   font_size: 48
   font_color: white                           # FFmpeg color name or #RRGGBB
 
   # ── Image overlay ──────────────────────────────────────────────────
   # (used when type: image)
-  # path: /media/overlay.png   # JPEG or PNG with optional transparency
+  # path: /media/opt/overlay.png   # JPEG or PNG with optional transparency
 
   # Position of the overlay inside the output frame (pixels from top-left).
   x: 20

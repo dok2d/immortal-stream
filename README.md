@@ -69,15 +69,16 @@ cp config.example.yaml config.yaml
 $EDITOR config.yaml
 ```
 
-Mount any media files (placeholder image/video, overlay image, fonts) into `/media` inside the container.
+Place media files (placeholder image/video, overlay image, fonts) into `media/opt/`.
+Stream recordings are stored in `media/records/`.
 
 ### 3. Run
 
 ```sh
 podman run -d --name immortal-stream \
   --restart unless-stopped \
-  -v "$(pwd)/config.yaml:/etc/immortal-stream/config.yaml:ro" \
-  -v "$(pwd)/media:/media:ro" \
+  -v "$(pwd)/config.yaml:/etc/immortal-stream/config.yaml" \
+  -v "$(pwd)/media:/media" \
   -p 1935:1935/tcp \
   -p 8890:8890/udp \
   immortal-stream
@@ -152,11 +153,11 @@ placeholder:
   type: testcard           # black | testcard | image | video
   # Optional text drawn on top of any base type:
   # text: "Stream starting soon"
-  # font_path: /media/fonts/MyFont.ttf   # TTF/OTF; JetBrains Mono if omitted
+  # font_path: /media/opt/MyFont.ttf     # TTF/OTF; JetBrains Mono if omitted
   # font_size: 72
   # font_color: white                    # FFmpeg color name or #RRGGBB
   # Image/video placeholder:
-  # path: /media/holder.jpg  # required for image/video
+  # path: /media/opt/holder.jpg  # required for image/video
   x: 0                      # position (text: 0,0 = centered)
   y: 0
   opacity: 1.0
@@ -170,9 +171,9 @@ The placeholder is re-encoded to the configured output resolution. `testcard` sh
 overlay:
   enabled: true
   type: image              # image | text
-  path: /media/logo.png    # for type: image (PNG/JPEG)
-  # text: "LIVE"           # for type: text
-  # font_path: /media/font.ttf
+  path: /media/opt/logo.png  # for type: image (PNG/JPEG)
+  # text: "LIVE"             # for type: text
+  # font_path: /media/opt/font.ttf
   # font_size: 48
   # font_color: white
   x: 20

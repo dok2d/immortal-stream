@@ -69,15 +69,16 @@ cp config.example.yaml config.yaml
 $EDITOR config.yaml
 ```
 
-Медиафайлы (заглушка, оверлей, шрифты) монтируются в `/media` внутри контейнера.
+Медиафайлы (заглушка, оверлей, шрифты) размещаются в `media/opt/`.
+Записи стримов сохраняются в `media/records/`.
 
 ### 3. Запуск
 
 ```sh
 podman run -d --name immortal-stream \
   --restart unless-stopped \
-  -v "$(pwd)/config.yaml:/etc/immortal-stream/config.yaml:ro" \
-  -v "$(pwd)/media:/media:ro" \
+  -v "$(pwd)/config.yaml:/etc/immortal-stream/config.yaml" \
+  -v "$(pwd)/media:/media" \
   -p 1935:1935/tcp \
   -p 8890:8890/udp \
   immortal-stream
@@ -152,11 +153,11 @@ placeholder:
   type: testcard           # black | testcard | image | video
   # Текст поверх любого базового типа (опционально):
   # text: "Трансляция скоро начнётся"
-  # font_path: /media/fonts/MyFont.ttf   # TTF/OTF; JetBrains Mono если не указан
+  # font_path: /media/opt/MyFont.ttf     # TTF/OTF; JetBrains Mono если не указан
   # font_size: 72
   # font_color: white                    # Имя цвета FFmpeg или #RRGGBB
   # Заглушка-изображение/видео:
-  # path: /media/holder.jpg  # обязательно для image/video
+  # path: /media/opt/holder.jpg  # обязательно для image/video
   x: 0                      # позиция (text: 0,0 = по центру)
   y: 0
   opacity: 1.0
@@ -170,9 +171,9 @@ placeholder:
 overlay:
   enabled: true
   type: image              # image | text
-  path: /media/logo.png    # для type: image (PNG/JPEG)
-  # text: "LIVE"           # для type: text
-  # font_path: /media/font.ttf
+  path: /media/opt/logo.png  # для type: image (PNG/JPEG)
+  # text: "LIVE"             # для type: text
+  # font_path: /media/opt/font.ttf
   # font_size: 48
   # font_color: white
   x: 20

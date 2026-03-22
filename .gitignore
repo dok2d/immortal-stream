@@ -1,5 +1,9 @@
 config.yaml
-media/
+# Track media/ directory structure, ignore user content
+media/opt/*
+!media/opt/.gitkeep
+media/records/*
+!media/records/.gitkeep
 *.pyc
 __pycache__/
 *.egg-info/
